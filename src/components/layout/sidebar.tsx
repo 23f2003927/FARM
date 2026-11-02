@@ -117,3 +117,4 @@ export function Sidebar({ userRoles, userName, farmName }: SidebarProps) {
     </>
   )
 }
+

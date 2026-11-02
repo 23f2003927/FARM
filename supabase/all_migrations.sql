@@ -3,61 +3,26 @@
 -- Includes: RLS policies, triggers, helper functions
 
 -- ============================================================
--- HELPER FUNCTIONS (used by RLS policies)
+-- BASE UTILITY FUNCTIONS
 -- ============================================================
 
-CREATE OR REPLACE FUNCTION public.fn_user_farm_ids()
-RETURNS SETOF uuid
-LANGUAGE sql SECURITY DEFINER STABLE
+-- Reusable updated_at trigger function
+CREATE OR REPLACE FUNCTION public.fn_set_updated_at()
+RETURNS trigger
+LANGUAGE plpgsql
 SET search_path = ''
 AS $$
-  SELECT farm_id
-  FROM public.farm_memberships
-  WHERE user_id = auth.uid()
-    AND status = 'active';
-$$;
-
-CREATE OR REPLACE FUNCTION public.fn_user_has_farm_role(
-  p_farm_id uuid,
-  p_role text
-)
-RETURNS boolean
-LANGUAGE sql SECURITY DEFINER STABLE
-SET search_path = ''
-AS $$
-  SELECT EXISTS (
-    SELECT 1
-    FROM public.farm_memberships
-    WHERE user_id = auth.uid()
-      AND farm_id = p_farm_id
-      AND status = 'active'
-      AND p_role = ANY(roles)
-  );
-$$;
-
-CREATE OR REPLACE FUNCTION public.fn_user_has_any_farm_role(
-  p_farm_id uuid,
-  p_roles text[]
-)
-RETURNS boolean
-LANGUAGE sql SECURITY DEFINER STABLE
-SET search_path = ''
-AS $$
-  SELECT EXISTS (
-    SELECT 1
-    FROM public.farm_memberships
-    WHERE user_id = auth.uid()
-      AND farm_id = p_farm_id
-      AND status = 'active'
-      AND roles && p_roles
-  );
+BEGIN
+  NEW.updated_at = now();
+  RETURN NEW;
+END;
 $$;
 
 -- ============================================================
--- PROFILES
+-- 1. PROFILES
 -- ============================================================
 
-CREATE TABLE public.profiles (
+CREATE TABLE IF NOT EXISTS public.profiles (
   id uuid PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
   full_name text NOT NULL DEFAULT '',
   phone text,
@@ -69,9 +34,11 @@ CREATE TABLE public.profiles (
 
 ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "profiles_select_own" ON public.profiles;
 CREATE POLICY "profiles_select_own" ON public.profiles
   FOR SELECT USING (id = auth.uid());
 
+DROP POLICY IF EXISTS "profiles_update_own" ON public.profiles;
 CREATE POLICY "profiles_update_own" ON public.profiles
   FOR UPDATE USING (id = auth.uid())
   WITH CHECK (id = auth.uid());
@@ -87,36 +54,27 @@ BEGIN
   VALUES (
     NEW.id,
     COALESCE(NEW.raw_user_meta_data ->> 'full_name', NEW.email, '')
-  );
+  )
+  ON CONFLICT (id) DO NOTHING;
   RETURN NEW;
 END;
 $$;
 
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
 CREATE TRIGGER on_auth_user_created
   AFTER INSERT ON auth.users
   FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
 
--- Updated_at trigger function (reused across tables)
-CREATE OR REPLACE FUNCTION public.fn_set_updated_at()
-RETURNS trigger
-LANGUAGE plpgsql
-SET search_path = ''
-AS $$
-BEGIN
-  NEW.updated_at = now();
-  RETURN NEW;
-END;
-$$;
-
+DROP TRIGGER IF EXISTS set_profiles_updated_at ON public.profiles;
 CREATE TRIGGER set_profiles_updated_at
   BEFORE UPDATE ON public.profiles
   FOR EACH ROW EXECUTE FUNCTION public.fn_set_updated_at();
 
 -- ============================================================
--- FARMS
+-- 2. FARMS (Table structure created before membership helpers)
 -- ============================================================
 
-CREATE TABLE public.farms (
+CREATE TABLE IF NOT EXISTS public.farms (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   name text NOT NULL,
   location text,
@@ -128,25 +86,16 @@ CREATE TABLE public.farms (
 
 ALTER TABLE public.farms ENABLE ROW LEVEL SECURITY;
 
-CREATE POLICY "farms_select" ON public.farms
-  FOR SELECT USING (id IN (SELECT public.fn_user_farm_ids()));
-
-CREATE POLICY "farms_insert" ON public.farms
-  FOR INSERT WITH CHECK (owner_id = auth.uid());
-
-CREATE POLICY "farms_update" ON public.farms
-  FOR UPDATE USING (public.fn_user_has_farm_role(id, 'owner'))
-  WITH CHECK (public.fn_user_has_farm_role(id, 'owner'));
-
+DROP TRIGGER IF EXISTS set_farms_updated_at ON public.farms;
 CREATE TRIGGER set_farms_updated_at
   BEFORE UPDATE ON public.farms
   FOR EACH ROW EXECUTE FUNCTION public.fn_set_updated_at();
 
 -- ============================================================
--- FARM MEMBERSHIPS
+-- 3. FARM MEMBERSHIPS (Table created BEFORE helper functions query it)
 -- ============================================================
 
-CREATE TABLE public.farm_memberships (
+CREATE TABLE IF NOT EXISTS public.farm_memberships (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
   user_id uuid NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
@@ -183,42 +132,119 @@ BEGIN
 END;
 $$;
 
+DROP TRIGGER IF EXISTS validate_membership_roles ON public.farm_memberships;
 CREATE TRIGGER validate_membership_roles
   BEFORE INSERT OR UPDATE ON public.farm_memberships
   FOR EACH ROW EXECUTE FUNCTION public.fn_validate_roles();
 
 ALTER TABLE public.farm_memberships ENABLE ROW LEVEL SECURITY;
 
--- Users can see their own memberships; owners can see all farm memberships
+DROP TRIGGER IF EXISTS set_farm_memberships_updated_at ON public.farm_memberships;
+CREATE TRIGGER set_farm_memberships_updated_at
+  BEFORE UPDATE ON public.farm_memberships
+  FOR EACH ROW EXECUTE FUNCTION public.fn_set_updated_at();
+
+CREATE INDEX IF NOT EXISTS idx_farm_memberships_user ON public.farm_memberships(user_id) WHERE status = 'active';
+CREATE INDEX IF NOT EXISTS idx_farm_memberships_farm ON public.farm_memberships(farm_id) WHERE status = 'active';
+
+-- ============================================================
+-- 4. HELPER FUNCTIONS (Created AFTER farm_memberships table exists)
+-- ============================================================
+
+CREATE OR REPLACE FUNCTION public.fn_user_farm_ids()
+RETURNS SETOF uuid
+LANGUAGE plpgsql SECURITY DEFINER STABLE
+SET search_path = ''
+AS $$
+BEGIN
+  RETURN QUERY
+  SELECT farm_id
+  FROM public.farm_memberships
+  WHERE user_id = auth.uid()
+    AND status = 'active';
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.fn_user_has_farm_role(
+  p_farm_id uuid,
+  p_role text
+)
+RETURNS boolean
+LANGUAGE plpgsql SECURITY DEFINER STABLE
+SET search_path = ''
+AS $$
+BEGIN
+  RETURN EXISTS (
+    SELECT 1
+    FROM public.farm_memberships
+    WHERE user_id = auth.uid()
+      AND farm_id = p_farm_id
+      AND status = 'active'
+      AND p_role = ANY(roles)
+  );
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.fn_user_has_any_farm_role(
+  p_farm_id uuid,
+  p_roles text[]
+)
+RETURNS boolean
+LANGUAGE plpgsql SECURITY DEFINER STABLE
+SET search_path = ''
+AS $$
+BEGIN
+  RETURN EXISTS (
+    SELECT 1
+    FROM public.farm_memberships
+    WHERE user_id = auth.uid()
+      AND farm_id = p_farm_id
+      AND status = 'active'
+      AND roles && p_roles
+  );
+END;
+$$;
+
+-- ============================================================
+-- 5. RLS POLICIES (Applied now that helper functions exist)
+-- ============================================================
+
+-- Farms Policies
+DROP POLICY IF EXISTS "farms_select" ON public.farms;
+CREATE POLICY "farms_select" ON public.farms
+  FOR SELECT USING (id IN (SELECT public.fn_user_farm_ids()));
+
+DROP POLICY IF EXISTS "farms_insert" ON public.farms;
+CREATE POLICY "farms_insert" ON public.farms
+  FOR INSERT WITH CHECK (owner_id = auth.uid());
+
+DROP POLICY IF EXISTS "farms_update" ON public.farms;
+CREATE POLICY "farms_update" ON public.farms
+  FOR UPDATE USING (public.fn_user_has_farm_role(id, 'owner'))
+  WITH CHECK (public.fn_user_has_farm_role(id, 'owner'));
+
+-- Farm Memberships Policies
+DROP POLICY IF EXISTS "fm_select" ON public.farm_memberships;
 CREATE POLICY "fm_select" ON public.farm_memberships
   FOR SELECT USING (
     user_id = auth.uid()
     OR public.fn_user_has_farm_role(farm_id, 'owner')
   );
 
--- Only owners can create memberships
+DROP POLICY IF EXISTS "fm_insert" ON public.farm_memberships;
 CREATE POLICY "fm_insert" ON public.farm_memberships
   FOR INSERT WITH CHECK (
     public.fn_user_has_farm_role(farm_id, 'owner')
     AND assigned_by = auth.uid()
   );
 
--- Only owners can update memberships
+DROP POLICY IF EXISTS "fm_update" ON public.farm_memberships;
 CREATE POLICY "fm_update" ON public.farm_memberships
   FOR UPDATE USING (public.fn_user_has_farm_role(farm_id, 'owner'))
   WITH CHECK (public.fn_user_has_farm_role(farm_id, 'owner'));
 
-CREATE TRIGGER set_farm_memberships_updated_at
-  BEFORE UPDATE ON public.farm_memberships
-  FOR EACH ROW EXECUTE FUNCTION public.fn_set_updated_at();
-
--- Index for performance
-CREATE INDEX idx_farm_memberships_user ON public.farm_memberships(user_id) WHERE status = 'active';
-CREATE INDEX idx_farm_memberships_farm ON public.farm_memberships(farm_id) WHERE status = 'active';
-
 -- ============================================================
--- BOOTSTRAP: Function to create first farm + owner membership
--- Run this AFTER creating a user via Supabase Auth dashboard
+-- 6. BOOTSTRAP: Function to create first farm + owner membership
 -- ============================================================
 
 CREATE OR REPLACE FUNCTION public.fn_bootstrap_farm(
@@ -233,6 +259,11 @@ AS $$
 DECLARE
   v_farm_id uuid;
 BEGIN
+  -- Ensure profile exists
+  INSERT INTO public.profiles (id, full_name)
+  VALUES (p_user_id, 'Farm Owner')
+  ON CONFLICT (id) DO NOTHING;
+
   -- Create the farm
   INSERT INTO public.farms (name, location, owner_id)
   VALUES (p_farm_name, p_farm_location, p_user_id)
@@ -240,11 +271,15 @@ BEGIN
 
   -- Create owner membership
   INSERT INTO public.farm_memberships (farm_id, user_id, roles, assigned_by)
-  VALUES (v_farm_id, p_user_id, ARRAY['owner'], p_user_id);
+  VALUES (v_farm_id, p_user_id, ARRAY['owner'], p_user_id)
+  ON CONFLICT (farm_id, user_id) DO UPDATE
+  SET roles = ARRAY['owner'], status = 'active';
 
   RETURN v_farm_id;
 END;
 $$;
+
+
 -- Migration: Farm structure (polyhouses, zones, crop cycles)
 -- Tables: houses, zones, crop_cycles
 
@@ -252,7 +287,7 @@ $$;
 -- HOUSES (Polyhouses)
 -- ============================================================
 
-CREATE TABLE public.houses (
+CREATE TABLE IF NOT EXISTS public.houses (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
   name text NOT NULL,
@@ -267,27 +302,31 @@ CREATE TABLE public.houses (
 
 ALTER TABLE public.houses ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "houses_select" ON public.houses;
 CREATE POLICY "houses_select" ON public.houses
   FOR SELECT USING (farm_id IN (SELECT public.fn_user_farm_ids()));
 
+DROP POLICY IF EXISTS "houses_insert" ON public.houses;
 CREATE POLICY "houses_insert" ON public.houses
   FOR INSERT WITH CHECK (public.fn_user_has_farm_role(farm_id, 'owner'));
 
+DROP POLICY IF EXISTS "houses_update" ON public.houses;
 CREATE POLICY "houses_update" ON public.houses
   FOR UPDATE USING (public.fn_user_has_farm_role(farm_id, 'owner'))
   WITH CHECK (public.fn_user_has_farm_role(farm_id, 'owner'));
 
+DROP TRIGGER IF EXISTS set_houses_updated_at ON public.houses;
 CREATE TRIGGER set_houses_updated_at
   BEFORE UPDATE ON public.houses
   FOR EACH ROW EXECUTE FUNCTION public.fn_set_updated_at();
 
-CREATE INDEX idx_houses_farm ON public.houses(farm_id);
+CREATE INDEX IF NOT EXISTS idx_houses_farm ON public.houses(farm_id);
 
 -- ============================================================
 -- ZONES
 -- ============================================================
 
-CREATE TABLE public.zones (
+CREATE TABLE IF NOT EXISTS public.zones (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   house_id uuid NOT NULL REFERENCES public.houses(id) ON DELETE CASCADE,
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
@@ -300,28 +339,32 @@ CREATE TABLE public.zones (
 
 ALTER TABLE public.zones ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "zones_select" ON public.zones;
 CREATE POLICY "zones_select" ON public.zones
   FOR SELECT USING (farm_id IN (SELECT public.fn_user_farm_ids()));
 
+DROP POLICY IF EXISTS "zones_insert" ON public.zones;
 CREATE POLICY "zones_insert" ON public.zones
   FOR INSERT WITH CHECK (public.fn_user_has_farm_role(farm_id, 'owner'));
 
+DROP POLICY IF EXISTS "zones_update" ON public.zones;
 CREATE POLICY "zones_update" ON public.zones
   FOR UPDATE USING (public.fn_user_has_farm_role(farm_id, 'owner'))
   WITH CHECK (public.fn_user_has_farm_role(farm_id, 'owner'));
 
+DROP TRIGGER IF EXISTS set_zones_updated_at ON public.zones;
 CREATE TRIGGER set_zones_updated_at
   BEFORE UPDATE ON public.zones
   FOR EACH ROW EXECUTE FUNCTION public.fn_set_updated_at();
 
-CREATE INDEX idx_zones_house ON public.zones(house_id);
-CREATE INDEX idx_zones_farm ON public.zones(farm_id);
+CREATE INDEX IF NOT EXISTS idx_zones_house ON public.zones(house_id);
+CREATE INDEX IF NOT EXISTS idx_zones_farm ON public.zones(farm_id);
 
 -- ============================================================
 -- CROP CYCLES
 -- ============================================================
 
-CREATE TABLE public.crop_cycles (
+CREATE TABLE IF NOT EXISTS public.crop_cycles (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
   house_id uuid NOT NULL REFERENCES public.houses(id) ON DELETE CASCADE,
@@ -341,32 +384,29 @@ CREATE TABLE public.crop_cycles (
 
 ALTER TABLE public.crop_cycles ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "crop_cycles_select" ON public.crop_cycles;
 CREATE POLICY "crop_cycles_select" ON public.crop_cycles
   FOR SELECT USING (farm_id IN (SELECT public.fn_user_farm_ids()));
 
+DROP POLICY IF EXISTS "crop_cycles_insert" ON public.crop_cycles;
 CREATE POLICY "crop_cycles_insert" ON public.crop_cycles
   FOR INSERT WITH CHECK (public.fn_user_has_farm_role(farm_id, 'owner'));
 
+DROP POLICY IF EXISTS "crop_cycles_update" ON public.crop_cycles;
 CREATE POLICY "crop_cycles_update" ON public.crop_cycles
   FOR UPDATE USING (public.fn_user_has_farm_role(farm_id, 'owner'))
   WITH CHECK (public.fn_user_has_farm_role(farm_id, 'owner'));
 
+DROP TRIGGER IF EXISTS set_crop_cycles_updated_at ON public.crop_cycles;
 CREATE TRIGGER set_crop_cycles_updated_at
   BEFORE UPDATE ON public.crop_cycles
   FOR EACH ROW EXECUTE FUNCTION public.fn_set_updated_at();
 
-CREATE INDEX idx_crop_cycles_farm ON public.crop_cycles(farm_id);
-CREATE INDEX idx_crop_cycles_house ON public.crop_cycles(house_id);
-CREATE INDEX idx_crop_cycles_status ON public.crop_cycles(farm_id, status);
+CREATE INDEX IF NOT EXISTS idx_crop_cycles_farm ON public.crop_cycles(farm_id);
+CREATE INDEX IF NOT EXISTS idx_crop_cycles_house ON public.crop_cycles(house_id);
+CREATE INDEX IF NOT EXISTS idx_crop_cycles_status ON public.crop_cycles(farm_id, status);
 
--- ============================================================
--- SEED DATA: Sample farm structure
--- ============================================================
 
--- NOTE: This seed data will be inserted using fn_bootstrap_farm
--- after the first user is created. The seed insert below is
--- a helper for development and will use a placeholder user_id.
--- The actual bootstrap is done via SQL after first signup.
 -- Migration: Product Master Catalogue & Aliases
 -- Tables: product_catalog, product_aliases, product_documents
 -- Includes: RLS policies, triggers, indexes
@@ -375,7 +415,7 @@ CREATE INDEX idx_crop_cycles_status ON public.crop_cycles(farm_id, status);
 -- PRODUCT CATALOGUE
 -- ============================================================
 
-CREATE TABLE public.product_catalog (
+CREATE TABLE IF NOT EXISTS public.product_catalog (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
   category text NOT NULL CHECK (
@@ -418,16 +458,19 @@ CREATE TABLE public.product_catalog (
 ALTER TABLE public.product_catalog ENABLE ROW LEVEL SECURITY;
 
 -- Farm members can view active products
+DROP POLICY IF EXISTS "product_catalog_select" ON public.product_catalog;
 CREATE POLICY "product_catalog_select" ON public.product_catalog
   FOR SELECT USING (farm_id IN (SELECT public.fn_user_farm_ids()));
 
 -- Owners and Agronomists can create products
+DROP POLICY IF EXISTS "product_catalog_insert" ON public.product_catalog;
 CREATE POLICY "product_catalog_insert" ON public.product_catalog
   FOR INSERT WITH CHECK (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist'])
   );
 
 -- Owner can update unverified products; Agronomist can verify/update products
+DROP POLICY IF EXISTS "product_catalog_update" ON public.product_catalog;
 CREATE POLICY "product_catalog_update" ON public.product_catalog
   FOR UPDATE USING (
     (public.fn_user_has_farm_role(farm_id, 'owner') AND verification_status != 'verified')
@@ -438,19 +481,20 @@ CREATE POLICY "product_catalog_update" ON public.product_catalog
     OR public.fn_user_has_farm_role(farm_id, 'agronomist')
   );
 
+DROP TRIGGER IF EXISTS set_product_catalog_updated_at ON public.product_catalog;
 CREATE TRIGGER set_product_catalog_updated_at
   BEFORE UPDATE ON public.product_catalog
   FOR EACH ROW EXECUTE FUNCTION public.fn_set_updated_at();
 
-CREATE INDEX idx_products_farm ON public.product_catalog(farm_id);
-CREATE INDEX idx_products_category ON public.product_catalog(farm_id, category);
-CREATE INDEX idx_products_status ON public.product_catalog(farm_id, verification_status);
+CREATE INDEX IF NOT EXISTS idx_products_farm ON public.product_catalog(farm_id);
+CREATE INDEX IF NOT EXISTS idx_products_category ON public.product_catalog(farm_id, category);
+CREATE INDEX IF NOT EXISTS idx_products_status ON public.product_catalog(farm_id, verification_status);
 
 -- ============================================================
 -- PRODUCT ALIASES
 -- ============================================================
 
-CREATE TABLE public.product_aliases (
+CREATE TABLE IF NOT EXISTS public.product_aliases (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   product_id uuid NOT NULL REFERENCES public.product_catalog(id) ON DELETE CASCADE,
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
@@ -466,14 +510,17 @@ CREATE TABLE public.product_aliases (
 
 ALTER TABLE public.product_aliases ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "product_aliases_select" ON public.product_aliases;
 CREATE POLICY "product_aliases_select" ON public.product_aliases
   FOR SELECT USING (farm_id IN (SELECT public.fn_user_farm_ids()));
 
+DROP POLICY IF EXISTS "product_aliases_insert" ON public.product_aliases;
 CREATE POLICY "product_aliases_insert" ON public.product_aliases
   FOR INSERT WITH CHECK (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist'])
   );
 
+DROP POLICY IF EXISTS "product_aliases_update" ON public.product_aliases;
 CREATE POLICY "product_aliases_update" ON public.product_aliases
   FOR UPDATE USING (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist'])
@@ -482,19 +529,20 @@ CREATE POLICY "product_aliases_update" ON public.product_aliases
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist'])
   );
 
+DROP POLICY IF EXISTS "product_aliases_delete" ON public.product_aliases;
 CREATE POLICY "product_aliases_delete" ON public.product_aliases
   FOR DELETE USING (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist'])
   );
 
-CREATE INDEX idx_aliases_product ON public.product_aliases(product_id);
-CREATE INDEX idx_aliases_farm_name ON public.product_aliases(farm_id, alias_name);
+CREATE INDEX IF NOT EXISTS idx_aliases_product ON public.product_aliases(product_id);
+CREATE INDEX IF NOT EXISTS idx_aliases_farm_name ON public.product_aliases(farm_id, alias_name);
 
 -- ============================================================
 -- PRODUCT DOCUMENTS (Labels, Leaflets, SDS)
 -- ============================================================
 
-CREATE TABLE public.product_documents (
+CREATE TABLE IF NOT EXISTS public.product_documents (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   product_id uuid NOT NULL REFERENCES public.product_catalog(id) ON DELETE CASCADE,
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
@@ -507,14 +555,24 @@ CREATE TABLE public.product_documents (
 
 ALTER TABLE public.product_documents ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "product_documents_select" ON public.product_documents;
 CREATE POLICY "product_documents_select" ON public.product_documents
   FOR SELECT USING (farm_id IN (SELECT public.fn_user_farm_ids()));
 
+DROP POLICY IF EXISTS "product_documents_insert" ON public.product_documents;
 CREATE POLICY "product_documents_insert" ON public.product_documents
   FOR INSERT WITH CHECK (
     uploaded_by = auth.uid()
     AND public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist'])
   );
+
+DROP POLICY IF EXISTS "product_documents_delete" ON public.product_documents;
+CREATE POLICY "product_documents_delete" ON public.product_documents
+  FOR DELETE USING (
+    public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist'])
+  );
+
+
 -- Migration: Optional Seed Data for Polyhouses & Standard Products
 -- Run this function after running fn_bootstrap_farm to populate initial demo data
 
@@ -532,6 +590,11 @@ DECLARE
   v_p3 uuid;
   v_p4 uuid;
 BEGIN
+  -- Prevent duplicate seeding if houses already exist for this farm
+  IF EXISTS (SELECT 1 FROM public.houses WHERE farm_id = p_farm_id) THEN
+    RETURN;
+  END IF;
+
   -- 1. Create Polyhouses
   INSERT INTO public.houses (farm_id, name, description, area_sqm, status)
   VALUES (p_farm_id, 'Polyhouse A (North)', 'Naturally ventilated polyhouse - 1000 sqm', 1000.00, 'active')
@@ -615,6 +678,8 @@ BEGIN
 
 END;
 $$;
+
+
 -- Migration: Treatment Plans & Line Items
 -- Tables: treatment_plans, treatment_plan_lines, treatment_plan_documents
 -- Includes: RLS policies, revision triggers, status validation
@@ -623,7 +688,7 @@ $$;
 -- TREATMENT PLANS (Header / Agronomist Visit Schedule)
 -- ============================================================
 
-CREATE TABLE public.treatment_plans (
+CREATE TABLE IF NOT EXISTS public.treatment_plans (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
   title text NOT NULL,
@@ -644,14 +709,17 @@ CREATE TABLE public.treatment_plans (
 
 ALTER TABLE public.treatment_plans ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "treatment_plans_select" ON public.treatment_plans;
 CREATE POLICY "treatment_plans_select" ON public.treatment_plans
   FOR SELECT USING (farm_id IN (SELECT public.fn_user_farm_ids()));
 
+DROP POLICY IF EXISTS "treatment_plans_insert" ON public.treatment_plans;
 CREATE POLICY "treatment_plans_insert" ON public.treatment_plans
   FOR INSERT WITH CHECK (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist'])
   );
 
+DROP POLICY IF EXISTS "treatment_plans_update" ON public.treatment_plans;
 CREATE POLICY "treatment_plans_update" ON public.treatment_plans
   FOR UPDATE USING (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist'])
@@ -660,18 +728,19 @@ CREATE POLICY "treatment_plans_update" ON public.treatment_plans
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist'])
   );
 
+DROP TRIGGER IF EXISTS set_treatment_plans_updated_at ON public.treatment_plans;
 CREATE TRIGGER set_treatment_plans_updated_at
   BEFORE UPDATE ON public.treatment_plans
   FOR EACH ROW EXECUTE FUNCTION public.fn_set_updated_at();
 
-CREATE INDEX idx_treatment_plans_farm ON public.treatment_plans(farm_id);
-CREATE INDEX idx_treatment_plans_status ON public.treatment_plans(farm_id, status);
+CREATE INDEX IF NOT EXISTS idx_treatment_plans_farm ON public.treatment_plans(farm_id);
+CREATE INDEX IF NOT EXISTS idx_treatment_plans_status ON public.treatment_plans(farm_id, status);
 
 -- ============================================================
 -- TREATMENT PLAN LINES (Discrete Chemical / Nutritional Instructions)
 -- ============================================================
 
-CREATE TABLE public.treatment_plan_lines (
+CREATE TABLE IF NOT EXISTS public.treatment_plan_lines (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   plan_id uuid NOT NULL REFERENCES public.treatment_plans(id) ON DELETE CASCADE,
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
@@ -747,15 +816,17 @@ CREATE TABLE public.treatment_plan_lines (
 
 ALTER TABLE public.treatment_plan_lines ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "treatment_lines_select" ON public.treatment_plan_lines;
 CREATE POLICY "treatment_lines_select" ON public.treatment_plan_lines
   FOR SELECT USING (farm_id IN (SELECT public.fn_user_farm_ids()));
 
+DROP POLICY IF EXISTS "treatment_lines_insert" ON public.treatment_plan_lines;
 CREATE POLICY "treatment_lines_insert" ON public.treatment_plan_lines
   FOR INSERT WITH CHECK (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist'])
   );
 
--- Owner can edit drafts; Agronomist can approve/clarify/reject; Owner can release approved
+DROP POLICY IF EXISTS "treatment_lines_update" ON public.treatment_plan_lines;
 CREATE POLICY "treatment_lines_update" ON public.treatment_plan_lines
   FOR UPDATE USING (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist'])
@@ -764,20 +835,21 @@ CREATE POLICY "treatment_lines_update" ON public.treatment_plan_lines
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist'])
   );
 
+DROP TRIGGER IF EXISTS set_treatment_plan_lines_updated_at ON public.treatment_plan_lines;
 CREATE TRIGGER set_treatment_plan_lines_updated_at
   BEFORE UPDATE ON public.treatment_plan_lines
   FOR EACH ROW EXECUTE FUNCTION public.fn_set_updated_at();
 
-CREATE INDEX idx_treatment_lines_plan ON public.treatment_plan_lines(plan_id);
-CREATE INDEX idx_treatment_lines_farm ON public.treatment_plan_lines(farm_id);
-CREATE INDEX idx_treatment_lines_status ON public.treatment_plan_lines(farm_id, status);
-CREATE INDEX idx_treatment_lines_date ON public.treatment_plan_lines(farm_id, scheduled_date);
+CREATE INDEX IF NOT EXISTS idx_treatment_lines_plan ON public.treatment_plan_lines(plan_id);
+CREATE INDEX IF NOT EXISTS idx_treatment_lines_farm ON public.treatment_plan_lines(farm_id);
+CREATE INDEX IF NOT EXISTS idx_treatment_lines_status ON public.treatment_plan_lines(farm_id, status);
+CREATE INDEX IF NOT EXISTS idx_treatment_lines_date ON public.treatment_plan_lines(farm_id, scheduled_date);
 
 -- ============================================================
 -- TREATMENT PLAN DOCUMENTS (Original Handwritten Notes / PDFs)
 -- ============================================================
 
-CREATE TABLE public.treatment_plan_documents (
+CREATE TABLE IF NOT EXISTS public.treatment_plan_documents (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   plan_id uuid NOT NULL REFERENCES public.treatment_plans(id) ON DELETE CASCADE,
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
@@ -792,14 +864,24 @@ CREATE TABLE public.treatment_plan_documents (
 
 ALTER TABLE public.treatment_plan_documents ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "treatment_docs_select" ON public.treatment_plan_documents;
 CREATE POLICY "treatment_docs_select" ON public.treatment_plan_documents
   FOR SELECT USING (farm_id IN (SELECT public.fn_user_farm_ids()));
 
+DROP POLICY IF EXISTS "treatment_docs_insert" ON public.treatment_plan_documents;
 CREATE POLICY "treatment_docs_insert" ON public.treatment_plan_documents
   FOR INSERT WITH CHECK (
     uploaded_by = auth.uid()
     AND public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist'])
   );
+
+DROP POLICY IF EXISTS "treatment_docs_delete" ON public.treatment_plan_documents;
+CREATE POLICY "treatment_docs_delete" ON public.treatment_plan_documents
+  FOR DELETE USING (
+    public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist'])
+  );
+
+
 -- Migration: Inventory Management, Batches & Append-Only Stock Movements
 -- Tables: suppliers, product_batches, stock_movements
 -- Views: v_stock_balances, v_usable_stock, v_expiring_batches
@@ -809,7 +891,7 @@ CREATE POLICY "treatment_docs_insert" ON public.treatment_plan_documents
 -- SUPPLIERS
 -- ============================================================
 
-CREATE TABLE public.suppliers (
+CREATE TABLE IF NOT EXISTS public.suppliers (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
   name text NOT NULL,
@@ -825,14 +907,17 @@ CREATE TABLE public.suppliers (
 
 ALTER TABLE public.suppliers ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "suppliers_select" ON public.suppliers;
 CREATE POLICY "suppliers_select" ON public.suppliers
   FOR SELECT USING (farm_id IN (SELECT public.fn_user_farm_ids()));
 
+DROP POLICY IF EXISTS "suppliers_insert" ON public.suppliers;
 CREATE POLICY "suppliers_insert" ON public.suppliers
   FOR INSERT WITH CHECK (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'procurement'])
   );
 
+DROP POLICY IF EXISTS "suppliers_update" ON public.suppliers;
 CREATE POLICY "suppliers_update" ON public.suppliers
   FOR UPDATE USING (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'procurement'])
@@ -841,6 +926,7 @@ CREATE POLICY "suppliers_update" ON public.suppliers
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'procurement'])
   );
 
+DROP TRIGGER IF EXISTS set_suppliers_updated_at ON public.suppliers;
 CREATE TRIGGER set_suppliers_updated_at
   BEFORE UPDATE ON public.suppliers
   FOR EACH ROW EXECUTE FUNCTION public.fn_set_updated_at();
@@ -849,7 +935,7 @@ CREATE TRIGGER set_suppliers_updated_at
 -- PRODUCT BATCHES (Lot Tracking & Expiry)
 -- ============================================================
 
-CREATE TABLE public.product_batches (
+CREATE TABLE IF NOT EXISTS public.product_batches (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   product_id uuid NOT NULL REFERENCES public.product_catalog(id) ON DELETE CASCADE,
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
@@ -874,14 +960,17 @@ CREATE TABLE public.product_batches (
 
 ALTER TABLE public.product_batches ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "batches_select" ON public.product_batches;
 CREATE POLICY "batches_select" ON public.product_batches
   FOR SELECT USING (farm_id IN (SELECT public.fn_user_farm_ids()));
 
+DROP POLICY IF EXISTS "batches_insert" ON public.product_batches;
 CREATE POLICY "batches_insert" ON public.product_batches
   FOR INSERT WITH CHECK (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'procurement'])
   );
 
+DROP POLICY IF EXISTS "batches_update" ON public.product_batches;
 CREATE POLICY "batches_update" ON public.product_batches
   FOR UPDATE USING (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'procurement'])
@@ -890,18 +979,19 @@ CREATE POLICY "batches_update" ON public.product_batches
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'procurement'])
   );
 
+DROP TRIGGER IF EXISTS set_product_batches_updated_at ON public.product_batches;
 CREATE TRIGGER set_product_batches_updated_at
   BEFORE UPDATE ON public.product_batches
   FOR EACH ROW EXECUTE FUNCTION public.fn_set_updated_at();
 
-CREATE INDEX idx_batches_product ON public.product_batches(product_id);
-CREATE INDEX idx_batches_expiry ON public.product_batches(farm_id, expiry_date);
+CREATE INDEX IF NOT EXISTS idx_batches_product ON public.product_batches(product_id);
+CREATE INDEX IF NOT EXISTS idx_batches_expiry ON public.product_batches(farm_id, expiry_date);
 
 -- ============================================================
 -- STOCK MOVEMENTS (APPEND-ONLY LEDGER)
 -- ============================================================
 
-CREATE TABLE public.stock_movements (
+CREATE TABLE IF NOT EXISTS public.stock_movements (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
   product_id uuid NOT NULL REFERENCES public.product_catalog(id),
@@ -930,9 +1020,11 @@ CREATE TABLE public.stock_movements (
 -- STRICT APPEND-ONLY: No UPDATE, No DELETE policies
 ALTER TABLE public.stock_movements ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "stock_movements_select" ON public.stock_movements;
 CREATE POLICY "stock_movements_select" ON public.stock_movements
   FOR SELECT USING (farm_id IN (SELECT public.fn_user_farm_ids()));
 
+DROP POLICY IF EXISTS "stock_movements_insert" ON public.stock_movements;
 CREATE POLICY "stock_movements_insert" ON public.stock_movements
   FOR INSERT WITH CHECK (
     farm_id IN (SELECT public.fn_user_farm_ids())
@@ -947,14 +1039,18 @@ CREATE POLICY "stock_movements_insert" ON public.stock_movements
     )
   );
 
-CREATE INDEX idx_movements_batch ON public.stock_movements(batch_id);
-CREATE INDEX idx_movements_product ON public.stock_movements(product_id);
-CREATE INDEX idx_movements_farm ON public.stock_movements(farm_id);
-CREATE INDEX idx_movements_date ON public.stock_movements(farm_id, movement_date);
+CREATE INDEX IF NOT EXISTS idx_movements_batch ON public.stock_movements(batch_id);
+CREATE INDEX IF NOT EXISTS idx_movements_product ON public.stock_movements(product_id);
+CREATE INDEX IF NOT EXISTS idx_movements_farm ON public.stock_movements(farm_id);
+CREATE INDEX IF NOT EXISTS idx_movements_date ON public.stock_movements(farm_id, movement_date);
 
 -- ============================================================
 -- VIEWS: CALCULATED STOCK BALANCES
 -- ============================================================
+
+DROP VIEW IF EXISTS public.v_expiring_batches CASCADE;
+DROP VIEW IF EXISTS public.v_usable_stock CASCADE;
+DROP VIEW IF EXISTS public.v_stock_balances CASCADE;
 
 -- Current calculated balance per batch from immutable ledger
 CREATE OR REPLACE VIEW public.v_stock_balances AS
@@ -1016,11 +1112,11 @@ SELECT
   expiry_date,
   current_balance,
   unit,
-  expiry_date - CURRENT_DATE AS days_until_expiry
+  (expiry_date - CURRENT_DATE) AS days_until_expiry
 FROM public.v_stock_balances
 WHERE expiry_date IS NOT NULL
   AND expiry_date >= CURRENT_DATE
-  AND expiry_date <= CURRENT_DATE + INTERVAL '60 days'
+  AND expiry_date <= (CURRENT_DATE + 60)
   AND current_balance > 0
 ORDER BY expiry_date ASC;
 
@@ -1037,7 +1133,8 @@ CREATE OR REPLACE FUNCTION public.fn_record_stock_movement(
   p_unit text,
   p_reference_type text DEFAULT NULL,
   p_reference_id uuid DEFAULT NULL,
-  p_reason text DEFAULT NULL
+  p_reason text DEFAULT NULL,
+  p_performed_by uuid DEFAULT NULL
 )
 RETURNS uuid
 LANGUAGE plpgsql SECURITY DEFINER
@@ -1047,7 +1144,13 @@ DECLARE
   v_current_balance numeric;
   v_movement_id uuid;
   v_batch_unit text;
+  v_user_id uuid;
 BEGIN
+  v_user_id := COALESCE(p_performed_by, auth.uid());
+  IF v_user_id IS NULL THEN
+    RAISE EXCEPTION 'Authentication required: neither p_performed_by nor auth.uid() provided';
+  END IF;
+
   -- 1. Check unit consistency with batch
   SELECT quantity_unit INTO v_batch_unit
   FROM public.product_batches
@@ -1096,13 +1199,15 @@ BEGIN
     p_reference_type,
     p_reference_id,
     p_reason,
-    auth.uid()
+    v_user_id
   )
   RETURNING id INTO v_movement_id;
 
   RETURN v_movement_id;
 END;
 $$;
+
+
 -- Migration: Procurement, Purchase Orders, and Demand Aggregation
 -- Tables: purchase_orders, purchase_order_lines, goods_receipts
 -- Views: v_procurement_demand, v_confirmed_incoming_stock
@@ -1111,7 +1216,7 @@ $$;
 -- PURCHASE ORDERS
 -- ============================================================
 
-CREATE TABLE public.purchase_orders (
+CREATE TABLE IF NOT EXISTS public.purchase_orders (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
   po_number text NOT NULL,
@@ -1142,15 +1247,18 @@ CREATE TABLE public.purchase_orders (
 
 ALTER TABLE public.purchase_orders ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "po_select" ON public.purchase_orders;
 CREATE POLICY "po_select" ON public.purchase_orders
   FOR SELECT USING (farm_id IN (SELECT public.fn_user_farm_ids()));
 
+DROP POLICY IF EXISTS "po_insert" ON public.purchase_orders;
 CREATE POLICY "po_insert" ON public.purchase_orders
   FOR INSERT WITH CHECK (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'procurement'])
   );
 
 -- Procurement can edit drafts; only Owner can approve
+DROP POLICY IF EXISTS "po_update" ON public.purchase_orders;
 CREATE POLICY "po_update" ON public.purchase_orders
   FOR UPDATE USING (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'procurement'])
@@ -1159,18 +1267,19 @@ CREATE POLICY "po_update" ON public.purchase_orders
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'procurement'])
   );
 
+DROP TRIGGER IF EXISTS set_purchase_orders_updated_at ON public.purchase_orders;
 CREATE TRIGGER set_purchase_orders_updated_at
   BEFORE UPDATE ON public.purchase_orders
   FOR EACH ROW EXECUTE FUNCTION public.fn_set_updated_at();
 
-CREATE INDEX idx_po_farm ON public.purchase_orders(farm_id);
-CREATE INDEX idx_po_status ON public.purchase_orders(farm_id, status);
+CREATE INDEX IF NOT EXISTS idx_po_farm ON public.purchase_orders(farm_id);
+CREATE INDEX IF NOT EXISTS idx_po_status ON public.purchase_orders(farm_id, status);
 
 -- ============================================================
 -- PURCHASE ORDER LINES
 -- ============================================================
 
-CREATE TABLE public.purchase_order_lines (
+CREATE TABLE IF NOT EXISTS public.purchase_order_lines (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   purchase_order_id uuid NOT NULL REFERENCES public.purchase_orders(id) ON DELETE CASCADE,
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
@@ -1191,14 +1300,17 @@ CREATE TABLE public.purchase_order_lines (
 
 ALTER TABLE public.purchase_order_lines ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "po_lines_select" ON public.purchase_order_lines;
 CREATE POLICY "po_lines_select" ON public.purchase_order_lines
   FOR SELECT USING (farm_id IN (SELECT public.fn_user_farm_ids()));
 
+DROP POLICY IF EXISTS "po_lines_insert" ON public.purchase_order_lines;
 CREATE POLICY "po_lines_insert" ON public.purchase_order_lines
   FOR INSERT WITH CHECK (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'procurement'])
   );
 
+DROP POLICY IF EXISTS "po_lines_update" ON public.purchase_order_lines;
 CREATE POLICY "po_lines_update" ON public.purchase_order_lines
   FOR UPDATE USING (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'procurement'])
@@ -1207,18 +1319,19 @@ CREATE POLICY "po_lines_update" ON public.purchase_order_lines
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'procurement'])
   );
 
+DROP TRIGGER IF EXISTS set_purchase_order_lines_updated_at ON public.purchase_order_lines;
 CREATE TRIGGER set_purchase_order_lines_updated_at
   BEFORE UPDATE ON public.purchase_order_lines
   FOR EACH ROW EXECUTE FUNCTION public.fn_set_updated_at();
 
-CREATE INDEX idx_po_lines_order ON public.purchase_order_lines(purchase_order_id);
-CREATE INDEX idx_po_lines_product ON public.purchase_order_lines(product_id);
+CREATE INDEX IF NOT EXISTS idx_po_lines_order ON public.purchase_order_lines(purchase_order_id);
+CREATE INDEX IF NOT EXISTS idx_po_lines_product ON public.purchase_order_lines(product_id);
 
 -- ============================================================
 -- GOODS RECEIPTS (PO Fulfillment Record)
 -- ============================================================
 
-CREATE TABLE public.goods_receipts (
+CREATE TABLE IF NOT EXISTS public.goods_receipts (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
   purchase_order_id uuid REFERENCES public.purchase_orders(id),
@@ -1236,17 +1349,28 @@ CREATE TABLE public.goods_receipts (
 
 ALTER TABLE public.goods_receipts ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "goods_receipts_select" ON public.goods_receipts;
 CREATE POLICY "goods_receipts_select" ON public.goods_receipts
   FOR SELECT USING (farm_id IN (SELECT public.fn_user_farm_ids()));
 
+DROP POLICY IF EXISTS "goods_receipts_insert" ON public.goods_receipts;
 CREATE POLICY "goods_receipts_insert" ON public.goods_receipts
   FOR INSERT WITH CHECK (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'procurement'])
   );
 
+DROP POLICY IF EXISTS "goods_receipts_delete" ON public.goods_receipts;
+CREATE POLICY "goods_receipts_delete" ON public.goods_receipts
+  FOR DELETE USING (
+    public.fn_user_has_farm_role(farm_id, 'owner')
+  );
+
 -- ============================================================
 -- VIEWS: PROCUREMENT DEMAND & INCOMING STOCK
 -- ============================================================
+
+DROP VIEW IF EXISTS public.v_confirmed_incoming_stock CASCADE;
+DROP VIEW IF EXISTS public.v_procurement_demand CASCADE;
 
 -- Aggregates upcoming approved treatments by product
 CREATE OR REPLACE VIEW public.v_procurement_demand AS
@@ -1287,15 +1411,17 @@ JOIN public.purchase_orders po ON po.id = pol.purchase_order_id
 WHERE po.status IN ('ordered', 'partially_received', 'approved')
   AND pol.status IN ('pending', 'partially_received')
 GROUP BY pol.product_id, pol.farm_id, pol.unit;
+
+
 -- Migration: Work Orders, Application Records, Checklists, Evidence & Equipment
--- Tables: work_orders, application_records, application_checklists, application_evidence, equipment, equipment_calibrations
--- Functions: fn_release_treatment_line, fn_complete_application
+-- Tables: equipment, work_orders, application_records, application_checklists
+-- Functions: fn_release_treatment_line
 
 -- ============================================================
 -- EQUIPMENT & SPRAYERS
 -- ============================================================
 
-CREATE TABLE public.equipment (
+CREATE TABLE IF NOT EXISTS public.equipment (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
   equipment_type text NOT NULL, -- e.g. 'Knapsack Sprayer', 'Battery Sprayer', 'HTP Power Sprayer', 'Drip System'
@@ -1313,14 +1439,17 @@ CREATE TABLE public.equipment (
 
 ALTER TABLE public.equipment ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "equipment_select" ON public.equipment;
 CREATE POLICY "equipment_select" ON public.equipment
   FOR SELECT USING (farm_id IN (SELECT public.fn_user_farm_ids()));
 
+DROP POLICY IF EXISTS "equipment_insert" ON public.equipment;
 CREATE POLICY "equipment_insert" ON public.equipment
   FOR INSERT WITH CHECK (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'supervisor'])
   );
 
+DROP POLICY IF EXISTS "equipment_update" ON public.equipment;
 CREATE POLICY "equipment_update" ON public.equipment
   FOR UPDATE USING (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'supervisor'])
@@ -1329,6 +1458,7 @@ CREATE POLICY "equipment_update" ON public.equipment
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'supervisor'])
   );
 
+DROP TRIGGER IF EXISTS set_equipment_updated_at ON public.equipment;
 CREATE TRIGGER set_equipment_updated_at
   BEFORE UPDATE ON public.equipment
   FOR EACH ROW EXECUTE FUNCTION public.fn_set_updated_at();
@@ -1337,7 +1467,7 @@ CREATE TRIGGER set_equipment_updated_at
 -- WORK ORDERS (Generated from Released Treatment Lines)
 -- ============================================================
 
-CREATE TABLE public.work_orders (
+CREATE TABLE IF NOT EXISTS public.work_orders (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
   treatment_line_id uuid NOT NULL REFERENCES public.treatment_plan_lines(id) ON DELETE RESTRICT,
@@ -1366,7 +1496,7 @@ CREATE TABLE public.work_orders (
 
 ALTER TABLE public.work_orders ENABLE ROW LEVEL SECURITY;
 
--- Owner, Agronomist, Verifier see all; Supervisor sees assigned work orders
+DROP POLICY IF EXISTS "work_orders_select" ON public.work_orders;
 CREATE POLICY "work_orders_select" ON public.work_orders
   FOR SELECT USING (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist', 'verifier'])
@@ -1376,11 +1506,13 @@ CREATE POLICY "work_orders_select" ON public.work_orders
     )
   );
 
+DROP POLICY IF EXISTS "work_orders_insert" ON public.work_orders;
 CREATE POLICY "work_orders_insert" ON public.work_orders
   FOR INSERT WITH CHECK (
     public.fn_user_has_farm_role(farm_id, 'owner')
   );
 
+DROP POLICY IF EXISTS "work_orders_update" ON public.work_orders;
 CREATE POLICY "work_orders_update" ON public.work_orders
   FOR UPDATE USING (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'supervisor', 'verifier'])
@@ -1389,19 +1521,20 @@ CREATE POLICY "work_orders_update" ON public.work_orders
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'supervisor', 'verifier'])
   );
 
+DROP TRIGGER IF EXISTS set_work_orders_updated_at ON public.work_orders;
 CREATE TRIGGER set_work_orders_updated_at
   BEFORE UPDATE ON public.work_orders
   FOR EACH ROW EXECUTE FUNCTION public.fn_set_updated_at();
 
-CREATE INDEX idx_wo_farm ON public.work_orders(farm_id);
-CREATE INDEX idx_wo_status ON public.work_orders(farm_id, status);
-CREATE INDEX idx_wo_assigned ON public.work_orders(assigned_to);
+CREATE INDEX IF NOT EXISTS idx_wo_farm ON public.work_orders(farm_id);
+CREATE INDEX IF NOT EXISTS idx_wo_status ON public.work_orders(farm_id, status);
+CREATE INDEX IF NOT EXISTS idx_wo_assigned ON public.work_orders(assigned_to);
 
 -- ============================================================
 -- APPLICATION RECORDS (Execution Log with Discrepancy Detection)
 -- ============================================================
 
-CREATE TABLE public.application_records (
+CREATE TABLE IF NOT EXISTS public.application_records (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
   work_order_id uuid NOT NULL REFERENCES public.work_orders(id) ON DELETE RESTRICT,
@@ -1433,23 +1566,25 @@ CREATE TABLE public.application_records (
   verified_by uuid REFERENCES public.profiles(id),
   verified_at timestamptz,
   verification_notes text,
-  has_discrepancy boolean GENERATED ALWAYS AS (actual_quantity IS DISTINCT FROM planned_quantity) STORED,
+  has_discrepancy boolean GENERATED ALWAYS AS (actual_quantity != planned_quantity) STORED,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 
 ALTER TABLE public.application_records ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "app_records_select" ON public.application_records;
 CREATE POLICY "app_records_select" ON public.application_records
   FOR SELECT USING (farm_id IN (SELECT public.fn_user_farm_ids()));
 
+DROP POLICY IF EXISTS "app_records_insert" ON public.application_records;
 CREATE POLICY "app_records_insert" ON public.application_records
   FOR INSERT WITH CHECK (
     operator_id = auth.uid()
     AND public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'supervisor'])
   );
 
--- Only Verifier or Owner can update verification status
+DROP POLICY IF EXISTS "app_records_update" ON public.application_records;
 CREATE POLICY "app_records_update" ON public.application_records
   FOR UPDATE USING (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'verifier'])
@@ -1458,19 +1593,20 @@ CREATE POLICY "app_records_update" ON public.application_records
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'verifier'])
   );
 
+DROP TRIGGER IF EXISTS set_application_records_updated_at ON public.application_records;
 CREATE TRIGGER set_application_records_updated_at
   BEFORE UPDATE ON public.application_records
   FOR EACH ROW EXECUTE FUNCTION public.fn_set_updated_at();
 
-CREATE INDEX idx_app_wo ON public.application_records(work_order_id);
-CREATE INDEX idx_app_farm ON public.application_records(farm_id);
-CREATE INDEX idx_app_verification ON public.application_records(farm_id, verification_status);
+CREATE INDEX IF NOT EXISTS idx_app_wo ON public.application_records(work_order_id);
+CREATE INDEX IF NOT EXISTS idx_app_farm ON public.application_records(farm_id);
+CREATE INDEX IF NOT EXISTS idx_app_verification ON public.application_records(farm_id, verification_status);
 
 -- ============================================================
 -- APPLICATION CHECKLISTS
 -- ============================================================
 
-CREATE TABLE public.application_checklists (
+CREATE TABLE IF NOT EXISTS public.application_checklists (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   application_id uuid NOT NULL REFERENCES public.application_records(id) ON DELETE CASCADE,
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
@@ -1485,9 +1621,11 @@ CREATE TABLE public.application_checklists (
 
 ALTER TABLE public.application_checklists ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "app_checklists_select" ON public.application_checklists;
 CREATE POLICY "app_checklists_select" ON public.application_checklists
   FOR SELECT USING (farm_id IN (SELECT public.fn_user_farm_ids()));
 
+DROP POLICY IF EXISTS "app_checklists_insert" ON public.application_checklists;
 CREATE POLICY "app_checklists_insert" ON public.application_checklists
   FOR INSERT WITH CHECK (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'supervisor'])
@@ -1586,6 +1724,8 @@ BEGIN
   RETURN v_wo_id;
 END;
 $$;
+
+
 -- Migration: Crop Health, Scouting Rounds, Observations & Response Tracking
 -- Tables: scouting_rounds, crop_observations, crop_observation_attachments, follow_up_tasks
 -- Views: v_unresolved_observations, v_overdue_followups
@@ -1594,7 +1734,7 @@ $$;
 -- SCOUTING ROUNDS
 -- ============================================================
 
-CREATE TABLE public.scouting_rounds (
+CREATE TABLE IF NOT EXISTS public.scouting_rounds (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
   house_id uuid NOT NULL REFERENCES public.houses(id),
@@ -1612,15 +1752,18 @@ CREATE TABLE public.scouting_rounds (
 
 ALTER TABLE public.scouting_rounds ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "scouting_rounds_select" ON public.scouting_rounds;
 CREATE POLICY "scouting_rounds_select" ON public.scouting_rounds
   FOR SELECT USING (farm_id IN (SELECT public.fn_user_farm_ids()));
 
+DROP POLICY IF EXISTS "scouting_rounds_insert" ON public.scouting_rounds;
 CREATE POLICY "scouting_rounds_insert" ON public.scouting_rounds
   FOR INSERT WITH CHECK (
     scout_id = auth.uid()
     AND public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist', 'supervisor'])
   );
 
+DROP POLICY IF EXISTS "scouting_rounds_update" ON public.scouting_rounds;
 CREATE POLICY "scouting_rounds_update" ON public.scouting_rounds
   FOR UPDATE USING (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist', 'supervisor'])
@@ -1629,18 +1772,19 @@ CREATE POLICY "scouting_rounds_update" ON public.scouting_rounds
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist', 'supervisor'])
   );
 
+DROP TRIGGER IF EXISTS set_scouting_rounds_updated_at ON public.scouting_rounds;
 CREATE TRIGGER set_scouting_rounds_updated_at
   BEFORE UPDATE ON public.scouting_rounds
   FOR EACH ROW EXECUTE FUNCTION public.fn_set_updated_at();
 
-CREATE INDEX idx_scouting_farm ON public.scouting_rounds(farm_id);
-CREATE INDEX idx_scouting_date ON public.scouting_rounds(farm_id, scouting_date);
+CREATE INDEX IF NOT EXISTS idx_scouting_farm ON public.scouting_rounds(farm_id);
+CREATE INDEX IF NOT EXISTS idx_scouting_date ON public.scouting_rounds(farm_id, scouting_date);
 
 -- ============================================================
 -- CROP OBSERVATIONS (Incidence, Severity & Response Tracking)
 -- ============================================================
 
-CREATE TABLE public.crop_observations (
+CREATE TABLE IF NOT EXISTS public.crop_observations (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   scouting_round_id uuid NOT NULL REFERENCES public.scouting_rounds(id) ON DELETE CASCADE,
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
@@ -1650,7 +1794,7 @@ CREATE TABLE public.crop_observations (
   -- Incidence Percentage computed with zero-division protection
   incidence_pct numeric(5,2) GENERATED ALWAYS AS (
     CASE 
-      WHEN plants_checked > 0 THEN ROUND((plants_affected::numeric / plants_checked) * 100, 2)
+      WHEN plants_checked > 0 THEN ROUND(((plants_affected::numeric / plants_checked) * 100), 2)
       ELSE 0.00
     END
   ) STORED,
@@ -1681,14 +1825,17 @@ CREATE TABLE public.crop_observations (
 
 ALTER TABLE public.crop_observations ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "crop_obs_select" ON public.crop_observations;
 CREATE POLICY "crop_obs_select" ON public.crop_observations
   FOR SELECT USING (farm_id IN (SELECT public.fn_user_farm_ids()));
 
+DROP POLICY IF EXISTS "crop_obs_insert" ON public.crop_observations;
 CREATE POLICY "crop_obs_insert" ON public.crop_observations
   FOR INSERT WITH CHECK (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist', 'supervisor'])
   );
 
+DROP POLICY IF EXISTS "crop_obs_update" ON public.crop_observations;
 CREATE POLICY "crop_obs_update" ON public.crop_observations
   FOR UPDATE USING (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist', 'supervisor'])
@@ -1697,19 +1844,20 @@ CREATE POLICY "crop_obs_update" ON public.crop_observations
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist', 'supervisor'])
   );
 
+DROP TRIGGER IF EXISTS set_crop_observations_updated_at ON public.crop_observations;
 CREATE TRIGGER set_crop_observations_updated_at
   BEFORE UPDATE ON public.crop_observations
   FOR EACH ROW EXECUTE FUNCTION public.fn_set_updated_at();
 
-CREATE INDEX idx_obs_farm ON public.crop_observations(farm_id);
-CREATE INDEX idx_obs_unresolved ON public.crop_observations(farm_id) WHERE is_resolved = false;
-CREATE INDEX idx_obs_escalated ON public.crop_observations(farm_id) WHERE is_escalated = true;
+CREATE INDEX IF NOT EXISTS idx_obs_farm ON public.crop_observations(farm_id);
+CREATE INDEX IF NOT EXISTS idx_obs_unresolved ON public.crop_observations(farm_id) WHERE is_resolved = false;
+CREATE INDEX IF NOT EXISTS idx_obs_escalated ON public.crop_observations(farm_id) WHERE is_escalated = true;
 
 -- ============================================================
 -- CROP OBSERVATION ATTACHMENTS (Photographic Evidence)
 -- ============================================================
 
-CREATE TABLE public.crop_observation_attachments (
+CREATE TABLE IF NOT EXISTS public.crop_observation_attachments (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   observation_id uuid NOT NULL REFERENCES public.crop_observations(id) ON DELETE CASCADE,
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
@@ -1725,9 +1873,11 @@ CREATE TABLE public.crop_observation_attachments (
 
 ALTER TABLE public.crop_observation_attachments ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "obs_attachments_select" ON public.crop_observation_attachments;
 CREATE POLICY "obs_attachments_select" ON public.crop_observation_attachments
   FOR SELECT USING (farm_id IN (SELECT public.fn_user_farm_ids()));
 
+DROP POLICY IF EXISTS "obs_attachments_insert" ON public.crop_observation_attachments;
 CREATE POLICY "obs_attachments_insert" ON public.crop_observation_attachments
   FOR INSERT WITH CHECK (
     uploaded_by = auth.uid()
@@ -1738,7 +1888,7 @@ CREATE POLICY "obs_attachments_insert" ON public.crop_observation_attachments
 -- FOLLOW-UP TASKS
 -- ============================================================
 
-CREATE TABLE public.follow_up_tasks (
+CREATE TABLE IF NOT EXISTS public.follow_up_tasks (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
   observation_id uuid REFERENCES public.crop_observations(id) ON DELETE CASCADE,
@@ -1761,14 +1911,17 @@ CREATE TABLE public.follow_up_tasks (
 
 ALTER TABLE public.follow_up_tasks ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "follow_ups_select" ON public.follow_up_tasks;
 CREATE POLICY "follow_ups_select" ON public.follow_up_tasks
   FOR SELECT USING (farm_id IN (SELECT public.fn_user_farm_ids()));
 
+DROP POLICY IF EXISTS "follow_ups_insert" ON public.follow_up_tasks;
 CREATE POLICY "follow_ups_insert" ON public.follow_up_tasks
   FOR INSERT WITH CHECK (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist', 'supervisor'])
   );
 
+DROP POLICY IF EXISTS "follow_ups_update" ON public.follow_up_tasks;
 CREATE POLICY "follow_ups_update" ON public.follow_up_tasks
   FOR UPDATE USING (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist', 'supervisor'])
@@ -1777,6 +1930,7 @@ CREATE POLICY "follow_ups_update" ON public.follow_up_tasks
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist', 'supervisor'])
   );
 
+DROP TRIGGER IF EXISTS set_follow_up_tasks_updated_at ON public.follow_up_tasks;
 CREATE TRIGGER set_follow_up_tasks_updated_at
   BEFORE UPDATE ON public.follow_up_tasks
   FOR EACH ROW EXECUTE FUNCTION public.fn_set_updated_at();
@@ -1784,6 +1938,9 @@ CREATE TRIGGER set_follow_up_tasks_updated_at
 -- ============================================================
 -- VIEWS: UNRESOLVED ANOMALIES & OVERDUE FOLLOW-UPS
 -- ============================================================
+
+DROP VIEW IF EXISTS public.v_overdue_followups CASCADE;
+DROP VIEW IF EXISTS public.v_unresolved_observations CASCADE;
 
 CREATE OR REPLACE VIEW public.v_unresolved_observations AS
 SELECT
@@ -1813,10 +1970,31 @@ SELECT
   fut.title,
   fut.due_date,
   fut.task_type,
-  CURRENT_DATE - fut.due_date AS days_overdue,
+  (CURRENT_DATE - fut.due_date) AS days_overdue,
   p.full_name AS assigned_to_name
 FROM public.follow_up_tasks fut
 LEFT JOIN public.profiles p ON p.id = fut.assigned_to
 WHERE fut.status IN ('pending', 'in_progress')
   AND fut.due_date < CURRENT_DATE
 ORDER BY fut.due_date ASC;
+
+
+-- ============================================================
+-- STORAGE BUCKETS (Product Documents, Treatment Documents, Crop Observations)
+-- ============================================================
+
+DO $storage_init$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'storage' AND table_name = 'buckets') THEN
+    INSERT INTO storage.buckets (id, name, public)
+    VALUES 
+      ('product-documents', 'product-documents', false),
+      ('treatment-documents', 'treatment-documents', false),
+      ('crop-observations', 'crop-observations', false)
+    ON CONFLICT (id) DO NOTHING;
+  END IF;
+EXCEPTION
+  WHEN OTHERS THEN
+    NULL;
+END;
+$storage_init$;

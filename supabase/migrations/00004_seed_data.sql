@@ -15,6 +15,11 @@ DECLARE
   v_p3 uuid;
   v_p4 uuid;
 BEGIN
+  -- Prevent duplicate seeding if houses already exist for this farm
+  IF EXISTS (SELECT 1 FROM public.houses WHERE farm_id = p_farm_id) THEN
+    RETURN;
+  END IF;
+
   -- 1. Create Polyhouses
   INSERT INTO public.houses (farm_id, name, description, area_sqm, status)
   VALUES (p_farm_id, 'Polyhouse A (North)', 'Naturally ventilated polyhouse - 1000 sqm', 1000.00, 'active')

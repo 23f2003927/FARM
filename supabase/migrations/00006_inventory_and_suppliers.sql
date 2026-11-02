@@ -7,7 +7,7 @@
 -- SUPPLIERS
 -- ============================================================
 
-CREATE TABLE public.suppliers (
+CREATE TABLE IF NOT EXISTS public.suppliers (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
   name text NOT NULL,
@@ -23,14 +23,17 @@ CREATE TABLE public.suppliers (
 
 ALTER TABLE public.suppliers ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "suppliers_select" ON public.suppliers;
 CREATE POLICY "suppliers_select" ON public.suppliers
   FOR SELECT USING (farm_id IN (SELECT public.fn_user_farm_ids()));
 
+DROP POLICY IF EXISTS "suppliers_insert" ON public.suppliers;
 CREATE POLICY "suppliers_insert" ON public.suppliers
   FOR INSERT WITH CHECK (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'procurement'])
   );
 
+DROP POLICY IF EXISTS "suppliers_update" ON public.suppliers;
 CREATE POLICY "suppliers_update" ON public.suppliers
   FOR UPDATE USING (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'procurement'])
@@ -39,6 +42,7 @@ CREATE POLICY "suppliers_update" ON public.suppliers
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'procurement'])
   );
 
+DROP TRIGGER IF EXISTS set_suppliers_updated_at ON public.suppliers;
 CREATE TRIGGER set_suppliers_updated_at
   BEFORE UPDATE ON public.suppliers
   FOR EACH ROW EXECUTE FUNCTION public.fn_set_updated_at();
@@ -47,7 +51,7 @@ CREATE TRIGGER set_suppliers_updated_at
 -- PRODUCT BATCHES (Lot Tracking & Expiry)
 -- ============================================================
 
-CREATE TABLE public.product_batches (
+CREATE TABLE IF NOT EXISTS public.product_batches (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   product_id uuid NOT NULL REFERENCES public.product_catalog(id) ON DELETE CASCADE,
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
@@ -72,14 +76,17 @@ CREATE TABLE public.product_batches (
 
 ALTER TABLE public.product_batches ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "batches_select" ON public.product_batches;
 CREATE POLICY "batches_select" ON public.product_batches
   FOR SELECT USING (farm_id IN (SELECT public.fn_user_farm_ids()));
 
+DROP POLICY IF EXISTS "batches_insert" ON public.product_batches;
 CREATE POLICY "batches_insert" ON public.product_batches
   FOR INSERT WITH CHECK (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'procurement'])
   );
 
+DROP POLICY IF EXISTS "batches_update" ON public.product_batches;
 CREATE POLICY "batches_update" ON public.product_batches
   FOR UPDATE USING (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'procurement'])
@@ -88,18 +95,19 @@ CREATE POLICY "batches_update" ON public.product_batches
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'procurement'])
   );
 
+DROP TRIGGER IF EXISTS set_product_batches_updated_at ON public.product_batches;
 CREATE TRIGGER set_product_batches_updated_at
   BEFORE UPDATE ON public.product_batches
   FOR EACH ROW EXECUTE FUNCTION public.fn_set_updated_at();
 
-CREATE INDEX idx_batches_product ON public.product_batches(product_id);
-CREATE INDEX idx_batches_expiry ON public.product_batches(farm_id, expiry_date);
+CREATE INDEX IF NOT EXISTS idx_batches_product ON public.product_batches(product_id);
+CREATE INDEX IF NOT EXISTS idx_batches_expiry ON public.product_batches(farm_id, expiry_date);
 
 -- ============================================================
 -- STOCK MOVEMENTS (APPEND-ONLY LEDGER)
 -- ============================================================
 
-CREATE TABLE public.stock_movements (
+CREATE TABLE IF NOT EXISTS public.stock_movements (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
   product_id uuid NOT NULL REFERENCES public.product_catalog(id),
@@ -128,9 +136,11 @@ CREATE TABLE public.stock_movements (
 -- STRICT APPEND-ONLY: No UPDATE, No DELETE policies
 ALTER TABLE public.stock_movements ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "stock_movements_select" ON public.stock_movements;
 CREATE POLICY "stock_movements_select" ON public.stock_movements
   FOR SELECT USING (farm_id IN (SELECT public.fn_user_farm_ids()));
 
+DROP POLICY IF EXISTS "stock_movements_insert" ON public.stock_movements;
 CREATE POLICY "stock_movements_insert" ON public.stock_movements
   FOR INSERT WITH CHECK (
     farm_id IN (SELECT public.fn_user_farm_ids())
@@ -145,14 +155,18 @@ CREATE POLICY "stock_movements_insert" ON public.stock_movements
     )
   );
 
-CREATE INDEX idx_movements_batch ON public.stock_movements(batch_id);
-CREATE INDEX idx_movements_product ON public.stock_movements(product_id);
-CREATE INDEX idx_movements_farm ON public.stock_movements(farm_id);
-CREATE INDEX idx_movements_date ON public.stock_movements(farm_id, movement_date);
+CREATE INDEX IF NOT EXISTS idx_movements_batch ON public.stock_movements(batch_id);
+CREATE INDEX IF NOT EXISTS idx_movements_product ON public.stock_movements(product_id);
+CREATE INDEX IF NOT EXISTS idx_movements_farm ON public.stock_movements(farm_id);
+CREATE INDEX IF NOT EXISTS idx_movements_date ON public.stock_movements(farm_id, movement_date);
 
 -- ============================================================
 -- VIEWS: CALCULATED STOCK BALANCES
 -- ============================================================
+
+DROP VIEW IF EXISTS public.v_expiring_batches CASCADE;
+DROP VIEW IF EXISTS public.v_usable_stock CASCADE;
+DROP VIEW IF EXISTS public.v_stock_balances CASCADE;
 
 -- Current calculated balance per batch from immutable ledger
 CREATE OR REPLACE VIEW public.v_stock_balances AS
@@ -214,11 +228,11 @@ SELECT
   expiry_date,
   current_balance,
   unit,
-  expiry_date - CURRENT_DATE AS days_until_expiry
+  (expiry_date - CURRENT_DATE) AS days_until_expiry
 FROM public.v_stock_balances
 WHERE expiry_date IS NOT NULL
   AND expiry_date >= CURRENT_DATE
-  AND expiry_date <= CURRENT_DATE + INTERVAL '60 days'
+  AND expiry_date <= (CURRENT_DATE + 60)
   AND current_balance > 0
 ORDER BY expiry_date ASC;
 
@@ -235,7 +249,8 @@ CREATE OR REPLACE FUNCTION public.fn_record_stock_movement(
   p_unit text,
   p_reference_type text DEFAULT NULL,
   p_reference_id uuid DEFAULT NULL,
-  p_reason text DEFAULT NULL
+  p_reason text DEFAULT NULL,
+  p_performed_by uuid DEFAULT NULL
 )
 RETURNS uuid
 LANGUAGE plpgsql SECURITY DEFINER
@@ -245,7 +260,13 @@ DECLARE
   v_current_balance numeric;
   v_movement_id uuid;
   v_batch_unit text;
+  v_user_id uuid;
 BEGIN
+  v_user_id := COALESCE(p_performed_by, auth.uid());
+  IF v_user_id IS NULL THEN
+    RAISE EXCEPTION 'Authentication required: neither p_performed_by nor auth.uid() provided';
+  END IF;
+
   -- 1. Check unit consistency with batch
   SELECT quantity_unit INTO v_batch_unit
   FROM public.product_batches
@@ -294,7 +315,7 @@ BEGIN
     p_reference_type,
     p_reference_id,
     p_reason,
-    auth.uid()
+    v_user_id
   )
   RETURNING id INTO v_movement_id;
 

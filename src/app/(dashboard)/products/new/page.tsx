@@ -353,3 +353,4 @@ export default async function NewProductPage() {
     </div>
   )
 }
+

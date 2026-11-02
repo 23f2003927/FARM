@@ -6,7 +6,7 @@
 -- TREATMENT PLANS (Header / Agronomist Visit Schedule)
 -- ============================================================
 
-CREATE TABLE public.treatment_plans (
+CREATE TABLE IF NOT EXISTS public.treatment_plans (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
   title text NOT NULL,
@@ -27,14 +27,17 @@ CREATE TABLE public.treatment_plans (
 
 ALTER TABLE public.treatment_plans ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "treatment_plans_select" ON public.treatment_plans;
 CREATE POLICY "treatment_plans_select" ON public.treatment_plans
   FOR SELECT USING (farm_id IN (SELECT public.fn_user_farm_ids()));
 
+DROP POLICY IF EXISTS "treatment_plans_insert" ON public.treatment_plans;
 CREATE POLICY "treatment_plans_insert" ON public.treatment_plans
   FOR INSERT WITH CHECK (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist'])
   );
 
+DROP POLICY IF EXISTS "treatment_plans_update" ON public.treatment_plans;
 CREATE POLICY "treatment_plans_update" ON public.treatment_plans
   FOR UPDATE USING (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist'])
@@ -43,18 +46,19 @@ CREATE POLICY "treatment_plans_update" ON public.treatment_plans
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist'])
   );
 
+DROP TRIGGER IF EXISTS set_treatment_plans_updated_at ON public.treatment_plans;
 CREATE TRIGGER set_treatment_plans_updated_at
   BEFORE UPDATE ON public.treatment_plans
   FOR EACH ROW EXECUTE FUNCTION public.fn_set_updated_at();
 
-CREATE INDEX idx_treatment_plans_farm ON public.treatment_plans(farm_id);
-CREATE INDEX idx_treatment_plans_status ON public.treatment_plans(farm_id, status);
+CREATE INDEX IF NOT EXISTS idx_treatment_plans_farm ON public.treatment_plans(farm_id);
+CREATE INDEX IF NOT EXISTS idx_treatment_plans_status ON public.treatment_plans(farm_id, status);
 
 -- ============================================================
 -- TREATMENT PLAN LINES (Discrete Chemical / Nutritional Instructions)
 -- ============================================================
 
-CREATE TABLE public.treatment_plan_lines (
+CREATE TABLE IF NOT EXISTS public.treatment_plan_lines (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   plan_id uuid NOT NULL REFERENCES public.treatment_plans(id) ON DELETE CASCADE,
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
@@ -130,15 +134,17 @@ CREATE TABLE public.treatment_plan_lines (
 
 ALTER TABLE public.treatment_plan_lines ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "treatment_lines_select" ON public.treatment_plan_lines;
 CREATE POLICY "treatment_lines_select" ON public.treatment_plan_lines
   FOR SELECT USING (farm_id IN (SELECT public.fn_user_farm_ids()));
 
+DROP POLICY IF EXISTS "treatment_lines_insert" ON public.treatment_plan_lines;
 CREATE POLICY "treatment_lines_insert" ON public.treatment_plan_lines
   FOR INSERT WITH CHECK (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist'])
   );
 
--- Owner can edit drafts; Agronomist can approve/clarify/reject; Owner can release approved
+DROP POLICY IF EXISTS "treatment_lines_update" ON public.treatment_plan_lines;
 CREATE POLICY "treatment_lines_update" ON public.treatment_plan_lines
   FOR UPDATE USING (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist'])
@@ -147,20 +153,21 @@ CREATE POLICY "treatment_lines_update" ON public.treatment_plan_lines
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist'])
   );
 
+DROP TRIGGER IF EXISTS set_treatment_plan_lines_updated_at ON public.treatment_plan_lines;
 CREATE TRIGGER set_treatment_plan_lines_updated_at
   BEFORE UPDATE ON public.treatment_plan_lines
   FOR EACH ROW EXECUTE FUNCTION public.fn_set_updated_at();
 
-CREATE INDEX idx_treatment_lines_plan ON public.treatment_plan_lines(plan_id);
-CREATE INDEX idx_treatment_lines_farm ON public.treatment_plan_lines(farm_id);
-CREATE INDEX idx_treatment_lines_status ON public.treatment_plan_lines(farm_id, status);
-CREATE INDEX idx_treatment_lines_date ON public.treatment_plan_lines(farm_id, scheduled_date);
+CREATE INDEX IF NOT EXISTS idx_treatment_lines_plan ON public.treatment_plan_lines(plan_id);
+CREATE INDEX IF NOT EXISTS idx_treatment_lines_farm ON public.treatment_plan_lines(farm_id);
+CREATE INDEX IF NOT EXISTS idx_treatment_lines_status ON public.treatment_plan_lines(farm_id, status);
+CREATE INDEX IF NOT EXISTS idx_treatment_lines_date ON public.treatment_plan_lines(farm_id, scheduled_date);
 
 -- ============================================================
 -- TREATMENT PLAN DOCUMENTS (Original Handwritten Notes / PDFs)
 -- ============================================================
 
-CREATE TABLE public.treatment_plan_documents (
+CREATE TABLE IF NOT EXISTS public.treatment_plan_documents (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   plan_id uuid NOT NULL REFERENCES public.treatment_plans(id) ON DELETE CASCADE,
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
@@ -175,11 +182,19 @@ CREATE TABLE public.treatment_plan_documents (
 
 ALTER TABLE public.treatment_plan_documents ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "treatment_docs_select" ON public.treatment_plan_documents;
 CREATE POLICY "treatment_docs_select" ON public.treatment_plan_documents
   FOR SELECT USING (farm_id IN (SELECT public.fn_user_farm_ids()));
 
+DROP POLICY IF EXISTS "treatment_docs_insert" ON public.treatment_plan_documents;
 CREATE POLICY "treatment_docs_insert" ON public.treatment_plan_documents
   FOR INSERT WITH CHECK (
     uploaded_by = auth.uid()
     AND public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist'])
+  );
+
+DROP POLICY IF EXISTS "treatment_docs_delete" ON public.treatment_plan_documents;
+CREATE POLICY "treatment_docs_delete" ON public.treatment_plan_documents
+  FOR DELETE USING (
+    public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist'])
   );

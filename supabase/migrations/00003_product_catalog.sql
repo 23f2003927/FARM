@@ -6,7 +6,7 @@
 -- PRODUCT CATALOGUE
 -- ============================================================
 
-CREATE TABLE public.product_catalog (
+CREATE TABLE IF NOT EXISTS public.product_catalog (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
   category text NOT NULL CHECK (
@@ -49,16 +49,19 @@ CREATE TABLE public.product_catalog (
 ALTER TABLE public.product_catalog ENABLE ROW LEVEL SECURITY;
 
 -- Farm members can view active products
+DROP POLICY IF EXISTS "product_catalog_select" ON public.product_catalog;
 CREATE POLICY "product_catalog_select" ON public.product_catalog
   FOR SELECT USING (farm_id IN (SELECT public.fn_user_farm_ids()));
 
 -- Owners and Agronomists can create products
+DROP POLICY IF EXISTS "product_catalog_insert" ON public.product_catalog;
 CREATE POLICY "product_catalog_insert" ON public.product_catalog
   FOR INSERT WITH CHECK (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist'])
   );
 
 -- Owner can update unverified products; Agronomist can verify/update products
+DROP POLICY IF EXISTS "product_catalog_update" ON public.product_catalog;
 CREATE POLICY "product_catalog_update" ON public.product_catalog
   FOR UPDATE USING (
     (public.fn_user_has_farm_role(farm_id, 'owner') AND verification_status != 'verified')
@@ -69,19 +72,20 @@ CREATE POLICY "product_catalog_update" ON public.product_catalog
     OR public.fn_user_has_farm_role(farm_id, 'agronomist')
   );
 
+DROP TRIGGER IF EXISTS set_product_catalog_updated_at ON public.product_catalog;
 CREATE TRIGGER set_product_catalog_updated_at
   BEFORE UPDATE ON public.product_catalog
   FOR EACH ROW EXECUTE FUNCTION public.fn_set_updated_at();
 
-CREATE INDEX idx_products_farm ON public.product_catalog(farm_id);
-CREATE INDEX idx_products_category ON public.product_catalog(farm_id, category);
-CREATE INDEX idx_products_status ON public.product_catalog(farm_id, verification_status);
+CREATE INDEX IF NOT EXISTS idx_products_farm ON public.product_catalog(farm_id);
+CREATE INDEX IF NOT EXISTS idx_products_category ON public.product_catalog(farm_id, category);
+CREATE INDEX IF NOT EXISTS idx_products_status ON public.product_catalog(farm_id, verification_status);
 
 -- ============================================================
 -- PRODUCT ALIASES
 -- ============================================================
 
-CREATE TABLE public.product_aliases (
+CREATE TABLE IF NOT EXISTS public.product_aliases (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   product_id uuid NOT NULL REFERENCES public.product_catalog(id) ON DELETE CASCADE,
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
@@ -97,14 +101,17 @@ CREATE TABLE public.product_aliases (
 
 ALTER TABLE public.product_aliases ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "product_aliases_select" ON public.product_aliases;
 CREATE POLICY "product_aliases_select" ON public.product_aliases
   FOR SELECT USING (farm_id IN (SELECT public.fn_user_farm_ids()));
 
+DROP POLICY IF EXISTS "product_aliases_insert" ON public.product_aliases;
 CREATE POLICY "product_aliases_insert" ON public.product_aliases
   FOR INSERT WITH CHECK (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist'])
   );
 
+DROP POLICY IF EXISTS "product_aliases_update" ON public.product_aliases;
 CREATE POLICY "product_aliases_update" ON public.product_aliases
   FOR UPDATE USING (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist'])
@@ -113,19 +120,20 @@ CREATE POLICY "product_aliases_update" ON public.product_aliases
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist'])
   );
 
+DROP POLICY IF EXISTS "product_aliases_delete" ON public.product_aliases;
 CREATE POLICY "product_aliases_delete" ON public.product_aliases
   FOR DELETE USING (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist'])
   );
 
-CREATE INDEX idx_aliases_product ON public.product_aliases(product_id);
-CREATE INDEX idx_aliases_farm_name ON public.product_aliases(farm_id, alias_name);
+CREATE INDEX IF NOT EXISTS idx_aliases_product ON public.product_aliases(product_id);
+CREATE INDEX IF NOT EXISTS idx_aliases_farm_name ON public.product_aliases(farm_id, alias_name);
 
 -- ============================================================
 -- PRODUCT DOCUMENTS (Labels, Leaflets, SDS)
 -- ============================================================
 
-CREATE TABLE public.product_documents (
+CREATE TABLE IF NOT EXISTS public.product_documents (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   product_id uuid NOT NULL REFERENCES public.product_catalog(id) ON DELETE CASCADE,
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
@@ -138,11 +146,19 @@ CREATE TABLE public.product_documents (
 
 ALTER TABLE public.product_documents ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "product_documents_select" ON public.product_documents;
 CREATE POLICY "product_documents_select" ON public.product_documents
   FOR SELECT USING (farm_id IN (SELECT public.fn_user_farm_ids()));
 
+DROP POLICY IF EXISTS "product_documents_insert" ON public.product_documents;
 CREATE POLICY "product_documents_insert" ON public.product_documents
   FOR INSERT WITH CHECK (
     uploaded_by = auth.uid()
     AND public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist'])
+  );
+
+DROP POLICY IF EXISTS "product_documents_delete" ON public.product_documents;
+CREATE POLICY "product_documents_delete" ON public.product_documents
+  FOR DELETE USING (
+    public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist'])
   );

@@ -15,3 +15,4 @@ export const NAVIGATION_ITEMS: NavItem[] = [
   { label: 'Reports', href: '/dashboard/reports', icon: '📈', roles: ['owner', 'agronomist', 'procurement'] },
   { label: 'Settings', href: '/dashboard/settings', icon: '⚙️', roles: ['owner'] },
 ]
+

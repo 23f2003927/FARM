@@ -8,3 +8,4 @@ export function Loading({ text = 'Loading...' }: { text?: string }) {
     </div>
   )
 }
+

@@ -6,7 +6,7 @@
 -- SCOUTING ROUNDS
 -- ============================================================
 
-CREATE TABLE public.scouting_rounds (
+CREATE TABLE IF NOT EXISTS public.scouting_rounds (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
   house_id uuid NOT NULL REFERENCES public.houses(id),
@@ -24,15 +24,18 @@ CREATE TABLE public.scouting_rounds (
 
 ALTER TABLE public.scouting_rounds ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "scouting_rounds_select" ON public.scouting_rounds;
 CREATE POLICY "scouting_rounds_select" ON public.scouting_rounds
   FOR SELECT USING (farm_id IN (SELECT public.fn_user_farm_ids()));
 
+DROP POLICY IF EXISTS "scouting_rounds_insert" ON public.scouting_rounds;
 CREATE POLICY "scouting_rounds_insert" ON public.scouting_rounds
   FOR INSERT WITH CHECK (
     scout_id = auth.uid()
     AND public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist', 'supervisor'])
   );
 
+DROP POLICY IF EXISTS "scouting_rounds_update" ON public.scouting_rounds;
 CREATE POLICY "scouting_rounds_update" ON public.scouting_rounds
   FOR UPDATE USING (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist', 'supervisor'])
@@ -41,18 +44,19 @@ CREATE POLICY "scouting_rounds_update" ON public.scouting_rounds
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist', 'supervisor'])
   );
 
+DROP TRIGGER IF EXISTS set_scouting_rounds_updated_at ON public.scouting_rounds;
 CREATE TRIGGER set_scouting_rounds_updated_at
   BEFORE UPDATE ON public.scouting_rounds
   FOR EACH ROW EXECUTE FUNCTION public.fn_set_updated_at();
 
-CREATE INDEX idx_scouting_farm ON public.scouting_rounds(farm_id);
-CREATE INDEX idx_scouting_date ON public.scouting_rounds(farm_id, scouting_date);
+CREATE INDEX IF NOT EXISTS idx_scouting_farm ON public.scouting_rounds(farm_id);
+CREATE INDEX IF NOT EXISTS idx_scouting_date ON public.scouting_rounds(farm_id, scouting_date);
 
 -- ============================================================
 -- CROP OBSERVATIONS (Incidence, Severity & Response Tracking)
 -- ============================================================
 
-CREATE TABLE public.crop_observations (
+CREATE TABLE IF NOT EXISTS public.crop_observations (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   scouting_round_id uuid NOT NULL REFERENCES public.scouting_rounds(id) ON DELETE CASCADE,
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
@@ -62,7 +66,7 @@ CREATE TABLE public.crop_observations (
   -- Incidence Percentage computed with zero-division protection
   incidence_pct numeric(5,2) GENERATED ALWAYS AS (
     CASE 
-      WHEN plants_checked > 0 THEN ROUND((plants_affected::numeric / plants_checked) * 100, 2)
+      WHEN plants_checked > 0 THEN ROUND(((plants_affected::numeric / plants_checked) * 100), 2)
       ELSE 0.00
     END
   ) STORED,
@@ -93,14 +97,17 @@ CREATE TABLE public.crop_observations (
 
 ALTER TABLE public.crop_observations ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "crop_obs_select" ON public.crop_observations;
 CREATE POLICY "crop_obs_select" ON public.crop_observations
   FOR SELECT USING (farm_id IN (SELECT public.fn_user_farm_ids()));
 
+DROP POLICY IF EXISTS "crop_obs_insert" ON public.crop_observations;
 CREATE POLICY "crop_obs_insert" ON public.crop_observations
   FOR INSERT WITH CHECK (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist', 'supervisor'])
   );
 
+DROP POLICY IF EXISTS "crop_obs_update" ON public.crop_observations;
 CREATE POLICY "crop_obs_update" ON public.crop_observations
   FOR UPDATE USING (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist', 'supervisor'])
@@ -109,19 +116,20 @@ CREATE POLICY "crop_obs_update" ON public.crop_observations
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist', 'supervisor'])
   );
 
+DROP TRIGGER IF EXISTS set_crop_observations_updated_at ON public.crop_observations;
 CREATE TRIGGER set_crop_observations_updated_at
   BEFORE UPDATE ON public.crop_observations
   FOR EACH ROW EXECUTE FUNCTION public.fn_set_updated_at();
 
-CREATE INDEX idx_obs_farm ON public.crop_observations(farm_id);
-CREATE INDEX idx_obs_unresolved ON public.crop_observations(farm_id) WHERE is_resolved = false;
-CREATE INDEX idx_obs_escalated ON public.crop_observations(farm_id) WHERE is_escalated = true;
+CREATE INDEX IF NOT EXISTS idx_obs_farm ON public.crop_observations(farm_id);
+CREATE INDEX IF NOT EXISTS idx_obs_unresolved ON public.crop_observations(farm_id) WHERE is_resolved = false;
+CREATE INDEX IF NOT EXISTS idx_obs_escalated ON public.crop_observations(farm_id) WHERE is_escalated = true;
 
 -- ============================================================
 -- CROP OBSERVATION ATTACHMENTS (Photographic Evidence)
 -- ============================================================
 
-CREATE TABLE public.crop_observation_attachments (
+CREATE TABLE IF NOT EXISTS public.crop_observation_attachments (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   observation_id uuid NOT NULL REFERENCES public.crop_observations(id) ON DELETE CASCADE,
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
@@ -137,9 +145,11 @@ CREATE TABLE public.crop_observation_attachments (
 
 ALTER TABLE public.crop_observation_attachments ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "obs_attachments_select" ON public.crop_observation_attachments;
 CREATE POLICY "obs_attachments_select" ON public.crop_observation_attachments
   FOR SELECT USING (farm_id IN (SELECT public.fn_user_farm_ids()));
 
+DROP POLICY IF EXISTS "obs_attachments_insert" ON public.crop_observation_attachments;
 CREATE POLICY "obs_attachments_insert" ON public.crop_observation_attachments
   FOR INSERT WITH CHECK (
     uploaded_by = auth.uid()
@@ -150,7 +160,7 @@ CREATE POLICY "obs_attachments_insert" ON public.crop_observation_attachments
 -- FOLLOW-UP TASKS
 -- ============================================================
 
-CREATE TABLE public.follow_up_tasks (
+CREATE TABLE IF NOT EXISTS public.follow_up_tasks (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
   observation_id uuid REFERENCES public.crop_observations(id) ON DELETE CASCADE,
@@ -173,14 +183,17 @@ CREATE TABLE public.follow_up_tasks (
 
 ALTER TABLE public.follow_up_tasks ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "follow_ups_select" ON public.follow_up_tasks;
 CREATE POLICY "follow_ups_select" ON public.follow_up_tasks
   FOR SELECT USING (farm_id IN (SELECT public.fn_user_farm_ids()));
 
+DROP POLICY IF EXISTS "follow_ups_insert" ON public.follow_up_tasks;
 CREATE POLICY "follow_ups_insert" ON public.follow_up_tasks
   FOR INSERT WITH CHECK (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist', 'supervisor'])
   );
 
+DROP POLICY IF EXISTS "follow_ups_update" ON public.follow_up_tasks;
 CREATE POLICY "follow_ups_update" ON public.follow_up_tasks
   FOR UPDATE USING (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist', 'supervisor'])
@@ -189,6 +202,7 @@ CREATE POLICY "follow_ups_update" ON public.follow_up_tasks
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist', 'supervisor'])
   );
 
+DROP TRIGGER IF EXISTS set_follow_up_tasks_updated_at ON public.follow_up_tasks;
 CREATE TRIGGER set_follow_up_tasks_updated_at
   BEFORE UPDATE ON public.follow_up_tasks
   FOR EACH ROW EXECUTE FUNCTION public.fn_set_updated_at();
@@ -196,6 +210,9 @@ CREATE TRIGGER set_follow_up_tasks_updated_at
 -- ============================================================
 -- VIEWS: UNRESOLVED ANOMALIES & OVERDUE FOLLOW-UPS
 -- ============================================================
+
+DROP VIEW IF EXISTS public.v_overdue_followups CASCADE;
+DROP VIEW IF EXISTS public.v_unresolved_observations CASCADE;
 
 CREATE OR REPLACE VIEW public.v_unresolved_observations AS
 SELECT
@@ -225,7 +242,7 @@ SELECT
   fut.title,
   fut.due_date,
   fut.task_type,
-  CURRENT_DATE - fut.due_date AS days_overdue,
+  (CURRENT_DATE - fut.due_date) AS days_overdue,
   p.full_name AS assigned_to_name
 FROM public.follow_up_tasks fut
 LEFT JOIN public.profiles p ON p.id = fut.assigned_to

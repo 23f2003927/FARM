@@ -6,7 +6,7 @@
 -- PURCHASE ORDERS
 -- ============================================================
 
-CREATE TABLE public.purchase_orders (
+CREATE TABLE IF NOT EXISTS public.purchase_orders (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
   po_number text NOT NULL,
@@ -37,15 +37,18 @@ CREATE TABLE public.purchase_orders (
 
 ALTER TABLE public.purchase_orders ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "po_select" ON public.purchase_orders;
 CREATE POLICY "po_select" ON public.purchase_orders
   FOR SELECT USING (farm_id IN (SELECT public.fn_user_farm_ids()));
 
+DROP POLICY IF EXISTS "po_insert" ON public.purchase_orders;
 CREATE POLICY "po_insert" ON public.purchase_orders
   FOR INSERT WITH CHECK (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'procurement'])
   );
 
 -- Procurement can edit drafts; only Owner can approve
+DROP POLICY IF EXISTS "po_update" ON public.purchase_orders;
 CREATE POLICY "po_update" ON public.purchase_orders
   FOR UPDATE USING (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'procurement'])
@@ -54,18 +57,19 @@ CREATE POLICY "po_update" ON public.purchase_orders
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'procurement'])
   );
 
+DROP TRIGGER IF EXISTS set_purchase_orders_updated_at ON public.purchase_orders;
 CREATE TRIGGER set_purchase_orders_updated_at
   BEFORE UPDATE ON public.purchase_orders
   FOR EACH ROW EXECUTE FUNCTION public.fn_set_updated_at();
 
-CREATE INDEX idx_po_farm ON public.purchase_orders(farm_id);
-CREATE INDEX idx_po_status ON public.purchase_orders(farm_id, status);
+CREATE INDEX IF NOT EXISTS idx_po_farm ON public.purchase_orders(farm_id);
+CREATE INDEX IF NOT EXISTS idx_po_status ON public.purchase_orders(farm_id, status);
 
 -- ============================================================
 -- PURCHASE ORDER LINES
 -- ============================================================
 
-CREATE TABLE public.purchase_order_lines (
+CREATE TABLE IF NOT EXISTS public.purchase_order_lines (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   purchase_order_id uuid NOT NULL REFERENCES public.purchase_orders(id) ON DELETE CASCADE,
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
@@ -86,14 +90,17 @@ CREATE TABLE public.purchase_order_lines (
 
 ALTER TABLE public.purchase_order_lines ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "po_lines_select" ON public.purchase_order_lines;
 CREATE POLICY "po_lines_select" ON public.purchase_order_lines
   FOR SELECT USING (farm_id IN (SELECT public.fn_user_farm_ids()));
 
+DROP POLICY IF EXISTS "po_lines_insert" ON public.purchase_order_lines;
 CREATE POLICY "po_lines_insert" ON public.purchase_order_lines
   FOR INSERT WITH CHECK (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'procurement'])
   );
 
+DROP POLICY IF EXISTS "po_lines_update" ON public.purchase_order_lines;
 CREATE POLICY "po_lines_update" ON public.purchase_order_lines
   FOR UPDATE USING (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'procurement'])
@@ -102,18 +109,19 @@ CREATE POLICY "po_lines_update" ON public.purchase_order_lines
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'procurement'])
   );
 
+DROP TRIGGER IF EXISTS set_purchase_order_lines_updated_at ON public.purchase_order_lines;
 CREATE TRIGGER set_purchase_order_lines_updated_at
   BEFORE UPDATE ON public.purchase_order_lines
   FOR EACH ROW EXECUTE FUNCTION public.fn_set_updated_at();
 
-CREATE INDEX idx_po_lines_order ON public.purchase_order_lines(purchase_order_id);
-CREATE INDEX idx_po_lines_product ON public.purchase_order_lines(product_id);
+CREATE INDEX IF NOT EXISTS idx_po_lines_order ON public.purchase_order_lines(purchase_order_id);
+CREATE INDEX IF NOT EXISTS idx_po_lines_product ON public.purchase_order_lines(product_id);
 
 -- ============================================================
 -- GOODS RECEIPTS (PO Fulfillment Record)
 -- ============================================================
 
-CREATE TABLE public.goods_receipts (
+CREATE TABLE IF NOT EXISTS public.goods_receipts (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
   purchase_order_id uuid REFERENCES public.purchase_orders(id),
@@ -131,17 +139,28 @@ CREATE TABLE public.goods_receipts (
 
 ALTER TABLE public.goods_receipts ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "goods_receipts_select" ON public.goods_receipts;
 CREATE POLICY "goods_receipts_select" ON public.goods_receipts
   FOR SELECT USING (farm_id IN (SELECT public.fn_user_farm_ids()));
 
+DROP POLICY IF EXISTS "goods_receipts_insert" ON public.goods_receipts;
 CREATE POLICY "goods_receipts_insert" ON public.goods_receipts
   FOR INSERT WITH CHECK (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'procurement'])
   );
 
+DROP POLICY IF EXISTS "goods_receipts_delete" ON public.goods_receipts;
+CREATE POLICY "goods_receipts_delete" ON public.goods_receipts
+  FOR DELETE USING (
+    public.fn_user_has_farm_role(farm_id, 'owner')
+  );
+
 -- ============================================================
 -- VIEWS: PROCUREMENT DEMAND & INCOMING STOCK
 -- ============================================================
+
+DROP VIEW IF EXISTS public.v_confirmed_incoming_stock CASCADE;
+DROP VIEW IF EXISTS public.v_procurement_demand CASCADE;
 
 -- Aggregates upcoming approved treatments by product
 CREATE OR REPLACE VIEW public.v_procurement_demand AS

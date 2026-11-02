@@ -129,3 +129,4 @@ export default async function SupervisorPortalPage() {
     </div>
   )
 }
+

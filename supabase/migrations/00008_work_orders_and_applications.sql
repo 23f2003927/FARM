@@ -1,12 +1,12 @@
 -- Migration: Work Orders, Application Records, Checklists, Evidence & Equipment
--- Tables: work_orders, application_records, application_checklists, application_evidence, equipment, equipment_calibrations
--- Functions: fn_release_treatment_line, fn_complete_application
+-- Tables: equipment, work_orders, application_records, application_checklists
+-- Functions: fn_release_treatment_line
 
 -- ============================================================
 -- EQUIPMENT & SPRAYERS
 -- ============================================================
 
-CREATE TABLE public.equipment (
+CREATE TABLE IF NOT EXISTS public.equipment (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
   equipment_type text NOT NULL, -- e.g. 'Knapsack Sprayer', 'Battery Sprayer', 'HTP Power Sprayer', 'Drip System'
@@ -24,14 +24,17 @@ CREATE TABLE public.equipment (
 
 ALTER TABLE public.equipment ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "equipment_select" ON public.equipment;
 CREATE POLICY "equipment_select" ON public.equipment
   FOR SELECT USING (farm_id IN (SELECT public.fn_user_farm_ids()));
 
+DROP POLICY IF EXISTS "equipment_insert" ON public.equipment;
 CREATE POLICY "equipment_insert" ON public.equipment
   FOR INSERT WITH CHECK (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'supervisor'])
   );
 
+DROP POLICY IF EXISTS "equipment_update" ON public.equipment;
 CREATE POLICY "equipment_update" ON public.equipment
   FOR UPDATE USING (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'supervisor'])
@@ -40,6 +43,7 @@ CREATE POLICY "equipment_update" ON public.equipment
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'supervisor'])
   );
 
+DROP TRIGGER IF EXISTS set_equipment_updated_at ON public.equipment;
 CREATE TRIGGER set_equipment_updated_at
   BEFORE UPDATE ON public.equipment
   FOR EACH ROW EXECUTE FUNCTION public.fn_set_updated_at();
@@ -48,7 +52,7 @@ CREATE TRIGGER set_equipment_updated_at
 -- WORK ORDERS (Generated from Released Treatment Lines)
 -- ============================================================
 
-CREATE TABLE public.work_orders (
+CREATE TABLE IF NOT EXISTS public.work_orders (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
   treatment_line_id uuid NOT NULL REFERENCES public.treatment_plan_lines(id) ON DELETE RESTRICT,
@@ -77,7 +81,7 @@ CREATE TABLE public.work_orders (
 
 ALTER TABLE public.work_orders ENABLE ROW LEVEL SECURITY;
 
--- Owner, Agronomist, Verifier see all; Supervisor sees assigned work orders
+DROP POLICY IF EXISTS "work_orders_select" ON public.work_orders;
 CREATE POLICY "work_orders_select" ON public.work_orders
   FOR SELECT USING (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'agronomist', 'verifier'])
@@ -87,11 +91,13 @@ CREATE POLICY "work_orders_select" ON public.work_orders
     )
   );
 
+DROP POLICY IF EXISTS "work_orders_insert" ON public.work_orders;
 CREATE POLICY "work_orders_insert" ON public.work_orders
   FOR INSERT WITH CHECK (
     public.fn_user_has_farm_role(farm_id, 'owner')
   );
 
+DROP POLICY IF EXISTS "work_orders_update" ON public.work_orders;
 CREATE POLICY "work_orders_update" ON public.work_orders
   FOR UPDATE USING (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'supervisor', 'verifier'])
@@ -100,19 +106,20 @@ CREATE POLICY "work_orders_update" ON public.work_orders
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'supervisor', 'verifier'])
   );
 
+DROP TRIGGER IF EXISTS set_work_orders_updated_at ON public.work_orders;
 CREATE TRIGGER set_work_orders_updated_at
   BEFORE UPDATE ON public.work_orders
   FOR EACH ROW EXECUTE FUNCTION public.fn_set_updated_at();
 
-CREATE INDEX idx_wo_farm ON public.work_orders(farm_id);
-CREATE INDEX idx_wo_status ON public.work_orders(farm_id, status);
-CREATE INDEX idx_wo_assigned ON public.work_orders(assigned_to);
+CREATE INDEX IF NOT EXISTS idx_wo_farm ON public.work_orders(farm_id);
+CREATE INDEX IF NOT EXISTS idx_wo_status ON public.work_orders(farm_id, status);
+CREATE INDEX IF NOT EXISTS idx_wo_assigned ON public.work_orders(assigned_to);
 
 -- ============================================================
 -- APPLICATION RECORDS (Execution Log with Discrepancy Detection)
 -- ============================================================
 
-CREATE TABLE public.application_records (
+CREATE TABLE IF NOT EXISTS public.application_records (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
   work_order_id uuid NOT NULL REFERENCES public.work_orders(id) ON DELETE RESTRICT,
@@ -144,23 +151,25 @@ CREATE TABLE public.application_records (
   verified_by uuid REFERENCES public.profiles(id),
   verified_at timestamptz,
   verification_notes text,
-  has_discrepancy boolean GENERATED ALWAYS AS (actual_quantity IS DISTINCT FROM planned_quantity) STORED,
+  has_discrepancy boolean GENERATED ALWAYS AS (actual_quantity != planned_quantity) STORED,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 
 ALTER TABLE public.application_records ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "app_records_select" ON public.application_records;
 CREATE POLICY "app_records_select" ON public.application_records
   FOR SELECT USING (farm_id IN (SELECT public.fn_user_farm_ids()));
 
+DROP POLICY IF EXISTS "app_records_insert" ON public.application_records;
 CREATE POLICY "app_records_insert" ON public.application_records
   FOR INSERT WITH CHECK (
     operator_id = auth.uid()
     AND public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'supervisor'])
   );
 
--- Only Verifier or Owner can update verification status
+DROP POLICY IF EXISTS "app_records_update" ON public.application_records;
 CREATE POLICY "app_records_update" ON public.application_records
   FOR UPDATE USING (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'verifier'])
@@ -169,19 +178,20 @@ CREATE POLICY "app_records_update" ON public.application_records
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'verifier'])
   );
 
+DROP TRIGGER IF EXISTS set_application_records_updated_at ON public.application_records;
 CREATE TRIGGER set_application_records_updated_at
   BEFORE UPDATE ON public.application_records
   FOR EACH ROW EXECUTE FUNCTION public.fn_set_updated_at();
 
-CREATE INDEX idx_app_wo ON public.application_records(work_order_id);
-CREATE INDEX idx_app_farm ON public.application_records(farm_id);
-CREATE INDEX idx_app_verification ON public.application_records(farm_id, verification_status);
+CREATE INDEX IF NOT EXISTS idx_app_wo ON public.application_records(work_order_id);
+CREATE INDEX IF NOT EXISTS idx_app_farm ON public.application_records(farm_id);
+CREATE INDEX IF NOT EXISTS idx_app_verification ON public.application_records(farm_id, verification_status);
 
 -- ============================================================
 -- APPLICATION CHECKLISTS
 -- ============================================================
 
-CREATE TABLE public.application_checklists (
+CREATE TABLE IF NOT EXISTS public.application_checklists (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   application_id uuid NOT NULL REFERENCES public.application_records(id) ON DELETE CASCADE,
   farm_id uuid NOT NULL REFERENCES public.farms(id) ON DELETE CASCADE,
@@ -196,9 +206,11 @@ CREATE TABLE public.application_checklists (
 
 ALTER TABLE public.application_checklists ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "app_checklists_select" ON public.application_checklists;
 CREATE POLICY "app_checklists_select" ON public.application_checklists
   FOR SELECT USING (farm_id IN (SELECT public.fn_user_farm_ids()));
 
+DROP POLICY IF EXISTS "app_checklists_insert" ON public.application_checklists;
 CREATE POLICY "app_checklists_insert" ON public.application_checklists
   FOR INSERT WITH CHECK (
     public.fn_user_has_any_farm_role(farm_id, ARRAY['owner', 'supervisor'])

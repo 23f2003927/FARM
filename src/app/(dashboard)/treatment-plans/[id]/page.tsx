@@ -559,3 +559,4 @@ export default async function TreatmentPlanDetailPage({
     </div>
   )
 }
+

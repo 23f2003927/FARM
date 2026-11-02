@@ -442,3 +442,4 @@ export default async function NewTreatmentPlanPage() {
     </div>
   )
 }
+

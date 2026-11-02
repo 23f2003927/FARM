@@ -477,3 +477,4 @@ export default async function PurchaseOrderDetailPage({
     </div>
   )
 }
+

@@ -230,3 +230,4 @@ export default async function FarmStructurePage() {
     </div>
   )
 }
+
