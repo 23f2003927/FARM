@@ -1,4 +1,5 @@
 import { createClient } from '@/lib/supabase/server'
+import { getCachedUser, getCachedFarmMembership } from '@/lib/supabase/cached'
 import { PageHeader } from '@/components/layout/page-header'
 import { StatusBadge } from '@/components/ui/status-badge'
 import Link from 'next/link'
@@ -9,18 +10,13 @@ export default async function TreatmentPlansPage({
   searchParams: Promise<{ status?: string }>
 }) {
   const { status } = await searchParams
+  const user = await getCachedUser()
+  const membership = await getCachedFarmMembership(user?.id)
+
+  const farmId = membership?.farm_id
+  const canCreate = membership?.roles?.some((r: string) => ['owner', 'agronomist'].includes(r))
+
   const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-
-  const { data: memberships } = await supabase
-    .from('farm_memberships')
-    .select('farm_id, roles')
-    .eq('user_id', user?.id)
-    .eq('status', 'active')
-    .single()
-
-  const farmId = memberships?.farm_id
-  const canCreate = memberships?.roles?.some((r: string) => ['owner', 'agronomist'].includes(r))
 
   let query = supabase
     .from('treatment_plans')

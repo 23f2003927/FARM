@@ -1,4 +1,5 @@
 import { createClient } from '@/lib/supabase/server'
+import { getCachedUser, getCachedFarmMembership } from '@/lib/supabase/cached'
 import { PageHeader } from '@/components/layout/page-header'
 import { StatusBadge } from '@/components/ui/status-badge'
 import { revalidatePath } from 'next/cache'
@@ -9,19 +10,14 @@ export default async function ApplicationsPage({
   searchParams: Promise<{ verification?: string }>
 }) {
   const { verification } = await searchParams
-  const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
+  const user = await getCachedUser()
+  const membership = await getCachedFarmMembership(user?.id)
 
-  const { data: memberships } = await supabase
-    .from('farm_memberships')
-    .select('farm_id, roles')
-    .eq('user_id', user?.id)
-    .eq('status', 'active')
-    .single()
-
-  const farmId = memberships?.farm_id
-  const roles = (memberships?.roles || []) as string[]
+  const farmId = membership?.farm_id
+  const roles = (membership?.roles || []) as string[]
   const isVerifier = roles.includes('verifier') || roles.includes('owner')
+
+  const supabase = await createClient()
 
   let query = supabase
     .from('application_records')

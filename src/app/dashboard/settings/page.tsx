@@ -1,26 +1,19 @@
 import { createClient } from '@/lib/supabase/server'
+import { getCachedUser, getCachedFarmMembership, getCachedProfile } from '@/lib/supabase/cached'
 import { PageHeader } from '@/components/layout/page-header'
 import { revalidatePath } from 'next/cache'
 
 export default async function SettingsPage() {
+  const user = await getCachedUser()
+  const [membership, profile] = await Promise.all([
+    getCachedFarmMembership(user?.id),
+    getCachedProfile(user?.id),
+  ])
+
+  const farm = (Array.isArray(membership?.farms) ? membership.farms[0] : membership?.farms) as { id: string; name: string; location: string | null } | undefined
+  const isOwner = membership?.roles?.includes('owner')
+
   const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-
-  const { data: memberships } = await supabase
-    .from('farm_memberships')
-    .select('farm_id, roles, farms(*)')
-    .eq('user_id', user?.id)
-    .eq('status', 'active')
-    .single()
-
-  const { data: profile } = await supabase
-    .from('profiles')
-    .select('*')
-    .eq('id', user?.id)
-    .single()
-
-  const farm = (Array.isArray(memberships?.farms) ? memberships.farms[0] : memberships?.farms) as { id: string; name: string; location: string | null } | undefined
-  const isOwner = memberships?.roles?.includes('owner')
 
   // Server Action: Update Farm Details
   async function updateFarm(formData: FormData) {

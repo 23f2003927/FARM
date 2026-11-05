@@ -1,23 +1,18 @@
 import { createClient } from '@/lib/supabase/server'
+import { getCachedUser, getCachedFarmMembership } from '@/lib/supabase/cached'
 import { PageHeader } from '@/components/layout/page-header'
 import { StatusBadge } from '@/components/ui/status-badge'
 import { revalidatePath } from 'next/cache'
 import type { CropCycle, House, Zone } from '@/types/app'
 
 export default async function CropCyclesPage() {
+  const user = await getCachedUser()
+  const membership = await getCachedFarmMembership(user?.id)
+
+  const farmId = membership?.farm_id
+  const isOwner = membership?.roles?.includes('owner')
+
   const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-
-  const { data: memberships } = await supabase
-    .from('farm_memberships')
-    .select('farm_id, roles')
-    .eq('user_id', user?.id)
-    .eq('status', 'active')
-    .single()
-
-  const farmId = memberships?.farm_id
-  const isOwner = memberships?.roles?.includes('owner')
-
   const [{ data: cycles }, { data: houses }] = await Promise.all([
     supabase
       .from('crop_cycles')

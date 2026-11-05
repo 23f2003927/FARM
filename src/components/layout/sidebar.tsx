@@ -48,15 +48,16 @@ export function Sidebar({ userRoles, userName, farmName }: SidebarProps) {
               <li key={item.href}>
                 <Link
                   href={item.href}
+                  prefetch={true}
                   onClick={() => setMobileOpen(false)}
-                  className={`flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors ${
+                  className={`flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-all duration-150 ${
                     isActive
-                      ? 'bg-green-50 text-green-700 font-medium'
-                      : 'text-gray-700 hover:bg-gray-100'
+                      ? 'bg-green-50 text-green-700 font-semibold shadow-xs ring-1 ring-green-200/50'
+                      : 'text-gray-700 hover:bg-gray-100 hover:text-gray-900'
                   }`}
                 >
-                  <span className="text-base">{item.icon}</span>
-                  <span>{item.label}</span>
+                  <span className="text-base select-none">{item.icon}</span>
+                  <span className="truncate">{item.label}</span>
                 </Link>
               </li>
             )
@@ -74,7 +75,7 @@ export function Sidebar({ userRoles, userName, farmName }: SidebarProps) {
         </div>
         <button
           onClick={handleSignOut}
-          className="w-full text-left px-3 py-2 text-sm text-red-600 hover:bg-red-50 rounded-md transition-colors"
+          className="w-full text-left px-3 py-2 text-sm text-red-600 hover:bg-red-50 rounded-md transition-colors font-medium cursor-pointer"
         >
           Sign out
         </button>
@@ -101,20 +102,19 @@ export function Sidebar({ userRoles, userName, farmName }: SidebarProps) {
         />
       )}
 
-      {/* Sidebar - mobile */}
+      {/* Mobile drawer */}
       <aside
-        className={`lg:hidden fixed inset-y-0 left-0 z-40 w-64 bg-white border-r border-gray-200 transform transition-transform duration-200 ease-in-out ${
+        className={`lg:hidden fixed inset-y-0 left-0 z-50 w-64 bg-white border-r border-gray-200 transform transition-transform duration-200 ease-in-out ${
           mobileOpen ? 'translate-x-0' : '-translate-x-full'
         }`}
       >
         {sidebarContent}
       </aside>
 
-      {/* Sidebar - desktop */}
-      <aside className="hidden lg:flex lg:flex-col lg:w-64 lg:fixed lg:inset-y-0 bg-white border-r border-gray-200">
+      {/* Desktop sidebar */}
+      <aside className="hidden lg:block fixed inset-y-0 left-0 w-64 border-r border-gray-200 z-30">
         {sidebarContent}
       </aside>
     </>
   )
 }
-

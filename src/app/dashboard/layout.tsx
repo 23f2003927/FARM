@@ -1,40 +1,25 @@
-import { createClient } from '@/lib/supabase/server'
+import { getCachedUser, getCachedFarmMembership, getCachedProfile } from '@/lib/supabase/cached'
 import { redirect } from 'next/navigation'
 import { Sidebar } from '@/components/layout/sidebar'
 import type { Role } from '@/types/enums'
-
-export const dynamic = 'force-dynamic'
 
 export default async function DashboardLayout({
   children,
 }: {
   children: React.ReactNode
 }) {
-  const supabase = await createClient()
-
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await getCachedUser()
 
   if (!user) {
     redirect('/login')
   }
 
-  // Fetch user profile
-  const { data: profile } = await supabase
-    .from('profiles')
-    .select('*')
-    .eq('id', user.id)
-    .single()
+  // Fetch profile and active farm membership concurrently using cached helpers
+  const [profile, activeMembership] = await Promise.all([
+    getCachedProfile(user.id),
+    getCachedFarmMembership(user.id),
+  ])
 
-  // Fetch active farm memberships
-  const { data: memberships } = await supabase
-    .from('farm_memberships')
-    .select('*, farms(*)')
-    .eq('user_id', user.id)
-    .eq('status', 'active')
-
-  const activeMembership = memberships?.[0]
   const farmName = activeMembership?.farms?.name || 'My Farm'
   const userRoles = (activeMembership?.roles || []) as Role[]
   const userName = profile?.full_name || user.email?.split('@')[0] || 'User'

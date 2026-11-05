@@ -1,25 +1,21 @@
 import { createClient } from '@/lib/supabase/server'
+import { getCachedUser, getCachedFarmMembership } from '@/lib/supabase/cached'
 import { PageHeader } from '@/components/layout/page-header'
 import Link from 'next/link'
 import type { Role } from '@/types/enums'
 import { ROLE_LABELS } from '@/types/enums'
 
 export default async function DashboardPage() {
-  const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
+  const user = await getCachedUser()
+  const activeMembership = await getCachedFarmMembership(user?.id)
 
-  const { data: memberships } = await supabase
-    .from('farm_memberships')
-    .select('*, farms(*)')
-    .eq('user_id', user?.id)
-    .eq('status', 'active')
-
-  const activeMembership = memberships?.[0]
   const farmId = activeMembership?.farm_id
   const roles = (activeMembership?.roles || []) as Role[]
   const farmName = activeMembership?.farms?.name || 'My Farm'
 
-  // Query real database metrics for the active farm
+  const supabase = await createClient()
+
+  // Query real database metrics for the active farm in parallel
   const [
     { count: houseCount },
     { count: cycleCount },

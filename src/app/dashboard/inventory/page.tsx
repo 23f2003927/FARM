@@ -1,23 +1,19 @@
 import { createClient } from '@/lib/supabase/server'
+import { getCachedUser, getCachedFarmMembership } from '@/lib/supabase/cached'
 import { PageHeader } from '@/components/layout/page-header'
 import { StatusBadge } from '@/components/ui/status-badge'
 import Link from 'next/link'
 
 export default async function InventoryPage() {
+  const user = await getCachedUser()
+  const membership = await getCachedFarmMembership(user?.id)
+
+  const farmId = membership?.farm_id
+  const canReceive = membership?.roles?.some((r: string) => ['owner', 'procurement'].includes(r))
+
   const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
 
-  const { data: memberships } = await supabase
-    .from('farm_memberships')
-    .select('farm_id, roles')
-    .eq('user_id', user?.id)
-    .eq('status', 'active')
-    .single()
-
-  const farmId = memberships?.farm_id
-  const canReceive = memberships?.roles?.some((r: string) => ['owner', 'procurement'].includes(r))
-
-  // Fetch Usable Stock, Batches, and Expiring Batches
+  // Fetch Usable Stock, Batches, and Expiring Batches in parallel
   const [{ data: usableStock }, { data: batches }, { data: expiringBatches }] = await Promise.all([
     supabase.from('v_usable_stock').select('*').eq('farm_id', farmId),
     supabase.from('v_stock_balances').select('*').eq('farm_id', farmId).order('trade_name', { ascending: true }),
